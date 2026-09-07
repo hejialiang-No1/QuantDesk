@@ -31,7 +31,7 @@ sudo xattr -dr com.apple.quarantine /Applications/QuantDesk.app
 ### 源码启动
 
 ```bash
-git clone https://github.com/<USER>/QuantDesk.git
+git clone https://github.com/hejialiang-No1/QuantDesk.git
 cd QuantDesk
 npm install --registry=https://registry.npmmirror.com  # 国内镜像
 export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/

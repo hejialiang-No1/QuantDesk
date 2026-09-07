@@ -5,7 +5,7 @@ export HTTP_PROXY=socks5h://127.0.0.1:7890
 cd "$(dirname "$0")/.."
 
 echo "[1/4] 等待 GitHub 授权..."
-for i in $(seq 1 120); do
+for i in $(seq 1 200); do
   if gh auth status >/dev/null 2>&1; then
     echo "    授权成功 (第 ${i} 次检查)"
     break
