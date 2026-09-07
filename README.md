@@ -2,7 +2,7 @@
 
 一个本地运行的 macOS 桌面应用，专为中文用户设计，集成 **行情 / 技术分析 / 量化选股 / 策略回测 / 预警** 五大模块。
 
-数据源走 **东方财富 → 腾讯 → 新浪** 三源自动降级，国内网络直连可用。
+数据源走 **东方财富 → 腾讯 → 新浪** 三源自动降级，国内网络直连可用，无需科学上网、无需 API Key。
 
 ## 功能速览
 
@@ -17,7 +17,9 @@
 ## 安装与启动
 
 ### 直接安装（推荐）
-下载 `build/QuantDesk-1.0.0-arm64.dmg`，双击挂载，把 QuantDesk 拖入 Applications。
+
+到本仓库的 **[Releases](../../releases)** 页面下载 `QuantDesk-1.0.0-arm64.dmg`，双击挂载，把 QuantDesk 拖入 Applications。
+
 首次打开若被 Gatekeeper 拦截（"已损坏"或"无法验证开发者"）：
 
 ```bash
@@ -27,17 +29,22 @@ sudo xattr -dr com.apple.quarantine /Applications/QuantDesk.app
 或者在 Finder 里右键 → 打开（绕过 gatekeeper）。
 
 ### 源码启动
+
 ```bash
-git clone ...
+git clone https://github.com/<USER>/QuantDesk.git
 cd QuantDesk
 npm install --registry=https://registry.npmmirror.com  # 国内镜像
 export ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
 npm start
 ```
 
+> 若 npm 安装 electron 二进制失败（GitHub 被墙），改用脚本手动装配：
+> `bash scripts/setup-electron.sh 44.2.0`
+
 ### 打 dmg
+
 ```bash
-npm run dist   # 输出 build/QuantDesk-1.0.0-arm64.dmg
+bash scripts/build-dmg.sh   # 输出 build/QuantDesk-1.0.0-arm64.dmg
 ```
 
 ## 内置指标与策略
@@ -88,12 +95,16 @@ QuantDesk/
 │           ├── chart.js        # Canvas K线 / 权益曲线
 │           └── app.js          # UI 主控
 ├── scripts/
-│   ├── smoke.js                # 数据层 + 算法层无头测试
+│   ├── smoke.js                # 数据层 + 算法层无头测试（25 项）
 │   ├── main-smoke.js           # 主进程无头测试
+│   ├── ui-smoke.sh             # 界面自检
 │   ├── make-icon.py            # 图标生成（PIL + iconutil）
-│   └── setup-electron.sh       # 手动装配 electron 二进制
-└── build/                      # 输出 dmg / app
+│   ├── setup-electron.sh       # 手动装配 electron 二进制（绕墙）
+│   └── build-dmg.sh            # 自建 .app + hdiutil 打 dmg
+└── build/                      # 输出 dmg / app（已 gitignore）
 ```
+
+> 打包没走 electron-builder：国内 npm 装它的依赖链会被反复拦截，改成直接组装 `.app` + `hdiutil`，5 分钟出 135 MB dmg，更可控。
 
 ## 自检脚本
 
