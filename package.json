@@ -1,0 +1,61 @@
+{
+  "name": "quantdesk",
+  "productName": "QuantDesk",
+  "version": "1.0.0",
+  "description": "QuantDesk - 美股量化终端 (US Equity Quant Terminal)",
+  "main": "src/main/main.js",
+  "author": "hejialiang",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "pack": "electron-builder --dir --mac --arm64",
+    "dist": "electron-builder --mac --arm64 --publish never",
+    "icon": "node scripts/make-icon.js"
+  },
+  "devDependencies": {
+    "electron": "44.2.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.quantdesk.terminal",
+    "productName": "QuantDesk",
+    "copyright": "Copyright © 2026 QuantDesk",
+    "asar": true,
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "directories": {
+      "output": "build"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ],
+      "category": "public.app-category.finance",
+      "icon": "assets/icon.icns",
+      "darkModeSupport": true,
+      "hardenedRuntime": false,
+      "identity": null,
+      "extendInfo": {
+        "NSHighResolutionCapable": true
+      }
+    },
+    "dmg": {
+      "title": "QuantDesk 美股量化终端",
+      "sign": false,
+      "window": {
+        "width": 700,
+        "height": 440
+      },
+      "contents": [
+        { "x": 180, "y": 210, "type": "link", "path": "/Applications" },
+        { "x": 520, "y": 210, "type": "file" }
+      ]
+    }
+  }
+}

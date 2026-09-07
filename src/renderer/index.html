@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>QuantDesk 美股量化终端</title>
+<link rel="stylesheet" href="css/app.css" />
+</head>
+<body>
+<div id="app">
+
+  <!-- ==================== 顶栏 ==================== -->
+  <div class="topbar">
+    <div class="brand">
+      <span class="logo">QuantDesk</span>
+      <span class="sub">US EQUITY TERMINAL v1.0</span>
+    </div>
+
+    <div class="index-strip" id="indexStrip">
+      <div class="idx"><span class="nm">纳指100</span><span class="pv">--</span><span class="pc">--</span></div>
+    </div>
+
+    <div class="spacer"></div>
+
+    <div class="search-box">
+      <span class="icon">⌕</span>
+      <input id="searchInput" type="text" placeholder="搜索代码 / 名称，如 NVDA、英伟达" autocomplete="off" />
+      <div class="search-pop" id="searchPop"></div>
+    </div>
+
+    <div class="status">
+      <span class="dot" id="statusDot"></span>
+      <span id="statusText">就绪</span>
+      <span id="clock" class="num" style="margin-left:6px"></span>
+    </div>
+  </div>
+
+  <div class="body">
+    <!-- ==================== 侧栏 ==================== -->
+    <div class="sidebar">
+      <div class="nav-item active" data-view="watch"><span class="ic">◈</span>自选行情</div>
+      <div class="nav-item" data-view="analyze"><span class="ic">◉</span>个股分析</div>
+      <div class="nav-item" data-view="scan"><span class="ic">⚡</span>量化选股</div>
+      <div class="nav-item" data-view="backtest"><span class="ic">⟳</span>策略回测</div>
+      <div class="nav-item" data-view="alerts"><span class="ic">◔</span>预警监控</div>
+      <div class="nav-item" data-view="settings"><span class="ic">⚙</span>设置</div>
+      <div class="side-foot">
+        数据源：东方财富<br />
+        延迟 15 分钟（美股盘中）<br />
+        <span id="footVer"></span>
+      </div>
+    </div>
+
+    <div class="content">
+      <!-- ==================== 自选行情 ==================== -->
+      <div class="view active" id="view-watch">
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>自选行情</h3>
+            <span class="desc">红涨绿跌 · 自动刷新</span>
+            <div class="spacer"></div>
+            <input class="input" id="addCode" placeholder="输入代码，如 AAPL" style="width:150px" />
+            <button class="btn" id="btnAdd">添加</button>
+            <label class="row" style="gap:6px;margin-left:6px">
+              <span class="muted" style="font-size:11.5px">自动刷新</span>
+              <span class="switch"><input type="checkbox" id="autoRefresh" checked /><span class="slider"></span></span>
+            </label>
+            <select class="input" id="refreshRate" style="width:96px">
+              <option value="10000">10 秒</option>
+              <option value="15000" selected>15 秒</option>
+              <option value="30000">30 秒</option>
+              <option value="60000">60 秒</option>
+            </select>
+            <button class="btn" id="btnRefresh">刷新</button>
+          </div>
+          <div class="panel-bd tight">
+            <table class="grid" id="watchTable">
+              <thead>
+                <tr>
+                  <th data-sort="code">代码 / 名称</th>
+                  <th data-sort="price">最新价</th>
+                  <th data-sort="changePct">涨跌幅</th>
+                  <th data-sort="change">涨跌额</th>
+                  <th data-sort="open">今开</th>
+                  <th data-sort="high">最高</th>
+                  <th data-sort="low">最低</th>
+                  <th data-sort="prevClose">昨收</th>
+                  <th data-sort="amount">成交额</th>
+                  <th data-sort="marketCap">总市值</th>
+                  <th data-sort="pe">PE(TTM)</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty" id="watchEmpty">自选列表为空，先添加几只股票吧（试试 NVDA、AAPL、TSLA）</div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>快捷股票池</h3>
+            <span class="desc">点击加入自选</span>
+          </div>
+          <div class="panel-bd" id="poolChips" style="display:flex;flex-wrap:wrap;gap:7px"></div>
+        </div>
+      </div>
+
+      <!-- ==================== 个股分析 ==================== -->
+      <div class="view" id="view-analyze">
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>个股技术分析</h3>
+            <div class="spacer"></div>
+            <input class="input" id="anaCode" placeholder="代码，如 NVDA" style="width:130px" />
+            <button class="btn primary" id="btnAnalyze">分析</button>
+            <div class="seg" id="periodSeg">
+              <button data-p="day" class="on">日K</button>
+              <button data-p="week">周K</button>
+              <button data-p="month">月K</button>
+            </div>
+            <select class="input" id="subInd" style="width:110px">
+              <option value="macd">MACD</option>
+              <option value="rsi">RSI</option>
+              <option value="kdj">KDJ</option>
+              <option value="vol">成交量</option>
+            </select>
+          </div>
+          <div class="panel-bd">
+            <div class="analyze-grid">
+              <div>
+                <div class="chart-wrap">
+                  <canvas class="chart" id="klineCanvas" height="460"></canvas>
+                  <div class="tooltip" id="klineTip"></div>
+                </div>
+                <div class="legend" id="klineLegend"></div>
+              </div>
+              <div>
+                <div id="anaScore"></div>
+                <div id="anaSignals" style="margin-bottom:14px"></div>
+                <div class="panel" style="margin-bottom:12px">
+                  <div class="panel-hd"><h3>因子拆解</h3></div>
+                  <div class="panel-bd" id="anaFactors"></div>
+                </div>
+                <div class="panel">
+                  <div class="panel-hd"><h3>关键指标</h3></div>
+                  <div class="panel-bd tight"><div class="kpi-grid" id="anaKpi"></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== 量化选股 ==================== -->
+      <div class="view" id="view-scan">
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>多因子扫描</h3>
+            <span class="desc">动量 / 趋势 / 均值回归 / 量能 / 波动 / 位置 六维打分</span>
+            <div class="spacer"></div>
+            <select class="input" id="scanSource" style="width:140px">
+              <option value="pool">精选池（推荐）</option>
+              <option value="market">全市场成交额榜</option>
+              <option value="watch">我的自选</option>
+            </select>
+            <select class="input" id="scanLimit" style="width:110px">
+              <option value="40">扫描 40 只</option>
+              <option value="80" selected>扫描 80 只</option>
+              <option value="150">扫描 150 只</option>
+            </select>
+            <button class="btn primary" id="btnScan">开始扫描</button>
+          </div>
+          <div class="panel-bd">
+            <div class="hint-box" style="margin-bottom:12px">
+              评分 <b>≥66</b> 为看多区间，<b>≤40</b> 建议回避。扫描会并发抓取历史K线做全量计算，
+              80 只约需 20–40 秒（受数据源限流影响）。结果仅供参考，不构成投资建议。
+            </div>
+            <div class="row" style="margin-bottom:10px">
+              <div class="progress" style="flex:1"><div class="bar" id="scanBar"></div></div>
+              <span class="muted num" id="scanText" style="font-size:11.5px;width:190px;text-align:right"></span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>扫描结果</h3>
+            <span class="desc" id="scanMeta"></span>
+            <div class="spacer"></div>
+            <select class="input" id="scanFilter" style="width:120px">
+              <option value="0">全部</option>
+              <option value="66">评分 ≥ 66</option>
+              <option value="52">评分 ≥ 52</option>
+            </select>
+            <button class="btn" id="btnExport">导出 CSV</button>
+          </div>
+          <div class="panel-bd tight">
+            <table class="grid" id="scanTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>代码 / 名称</th>
+                  <th data-sort="score">评分</th>
+                  <th>评级</th>
+                  <th data-sort="price">现价</th>
+                  <th data-sort="changePct">涨跌幅</th>
+                  <th data-sort="rsi">RSI</th>
+                  <th data-sort="ret20">20日涨幅</th>
+                  <th data-sort="volRatio">量比</th>
+                  <th>信号</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+            <div class="empty" id="scanEmpty">还没有扫描结果，点击「开始扫描」</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== 策略回测 ==================== -->
+      <div class="view" id="view-backtest">
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>策略回测</h3>
+            <span class="desc">信号次日开盘成交 · 计入手续费与滑点</span>
+          </div>
+          <div class="panel-bd">
+            <div class="row" style="margin-bottom:12px">
+              <label class="fld">标的代码
+                <input class="input" id="btCode" value="NVDA" style="width:110px" />
+              </label>
+              <label class="fld">策略
+                <select class="input" id="btStrategy" style="width:170px"></select>
+              </label>
+              <label class="fld">回测周期
+                <select class="input" id="btRange" style="width:120px">
+                  <option value="250">近 1 年</option>
+                  <option value="500" selected>近 2 年</option>
+                  <option value="1000">近 4 年</option>
+                  <option value="1500">近 6 年</option>
+                </select>
+              </label>
+              <label class="fld">初始资金($)
+                <input class="input num" id="btCapital" value="100000" style="width:110px" />
+              </label>
+              <label class="fld">手续费(%)
+                <input class="input num" id="btFee" value="0.05" style="width:80px" />
+              </label>
+              <div id="btParams" style="display:flex;gap:10px"></div>
+              <button class="btn primary" id="btnBacktest" style="margin-top:14px">运行回测</button>
+            </div>
+            <div class="hint-box" id="btDesc"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="btResult" style="display:none">
+          <div class="panel-hd">
+            <h3>回测结果</h3>
+            <span class="desc" id="btMeta"></span>
+          </div>
+          <div class="panel-bd">
+            <div class="bt-grid" id="btMetrics" style="margin-bottom:16px"></div>
+            <div class="panel" style="margin-bottom:14px">
+              <div class="panel-hd"><h3>权益曲线</h3><div class="spacer"></div>
+                <span class="legend"><span><i style="background:#4a9eff"></i>策略</span><span><i style="background:#7c8aa5"></i>买入持有</span></span>
+              </div>
+              <div class="panel-bd"><canvas class="chart" id="equityCanvas" height="240"></canvas></div>
+            </div>
+            <div class="panel">
+              <div class="panel-hd"><h3>交易明细</h3><span class="desc" id="btTradeMeta"></span></div>
+              <div class="panel-bd tight" style="max-height:300px;overflow-y:auto">
+                <table class="grid" id="btTrades">
+                  <thead><tr><th>#</th><th>日期</th><th>方向</th><th>价格</th><th>股数</th><th>金额</th><th>盈亏</th><th>收益率</th><th>持有天数</th></tr></thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ==================== 预警监控 ==================== -->
+      <div class="view" id="view-alerts">
+        <div class="panel">
+          <div class="panel-hd">
+            <h3>添加预警</h3>
+            <span class="desc">命中后弹出系统通知</span>
+          </div>
+          <div class="panel-bd">
+            <div class="row">
+              <label class="fld">代码
+                <input class="input" id="alCode" placeholder="NVDA" style="width:110px" />
+              </label>
+              <label class="fld">条件
+                <select class="input" id="alType" style="width:150px">
+                  <option value="above">价格上破</option>
+                  <option value="below">价格下破</option>
+                  <option value="pct_up">当日涨幅超过</option>
+                  <option value="pct_down">当日跌幅超过</option>
+                </select>
+              </label>
+              <label class="fld">阈值
+                <input class="input num" id="alValue" placeholder="250" style="width:110px" />
+              </label>
+              <button class="btn primary" id="btnAddAlert" style="margin-top:14px">添加预警</button>
+              <div class="spacer"></div>
+              <label class="row" style="gap:6px;margin-top:10px">
+                <span class="muted" style="font-size:11.5px">监控中</span>
+                <span class="switch"><input type="checkbox" id="alarmOn" checked /><span class="slider"></span></span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-hd"><h3>预警列表</h3><span class="desc" id="alertMeta"></span></div>
+          <div class="panel-bd tight" id="alertList"><div class="empty">暂无预警</div></div>
+        </div>
+      </div>
+
+      <!-- ==================== 设置 ==================== -->
+      <div class="view" id="view-settings">
+        <div class="panel">
+          <div class="panel-hd"><h3>数据与参数</h3></div>
+          <div class="panel-bd">
+            <div class="set-row">
+              <div>
+                <div class="lbl">K线复权方式</div>
+                <div class="hint">前复权适合技术分析，不复权适合看真实价格</div>
+              </div>
+              <select class="input" id="setFq" style="width:130px">
+                <option value="1">前复权</option>
+                <option value="0">不复权</option>
+                <option value="2">后复权</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <div>
+                <div class="lbl">默认K线周期</div>
+                <div class="hint">应用于个股分析与回测</div>
+              </div>
+              <select class="input" id="setPeriod" style="width:130px">
+                <option value="day">日K</option>
+                <option value="week">周K</option>
+                <option value="month">月K</option>
+              </select>
+            </div>
+            <div class="set-row">
+              <div>
+                <div class="lbl">清空本地缓存</div>
+                <div class="hint">缓存的行情与K线数据，清理后重新拉取</div>
+              </div>
+              <button class="btn" id="btnClearCache">清理缓存</button>
+            </div>
+            <div class="set-row">
+              <div>
+                <div class="lbl">重置自选与预警</div>
+                <div class="hint">清空所有本地数据（不可恢复）</div>
+              </div>
+              <button class="btn danger" id="btnReset">重置数据</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-hd"><h3>关于</h3></div>
+          <div class="panel-bd">
+            <div class="hint-box" style="margin-bottom:12px">
+              <b>QuantDesk</b> 是一个本地运行的美股量化终端。所有行情来自东方财富公开接口，
+              指标、因子评分与回测全部在本地计算，不上传任何数据。
+            </div>
+            <div class="kpi-grid" id="aboutKpi"></div>
+            <div style="margin-top:14px;font-size:11.5px;color:var(--muted);line-height:1.9">
+              · 数据源：东方财富（国内直连，延迟约 15 分钟）<br />
+              · 指标：MA / EMA / MACD / RSI / BOLL / KDJ / ATR，本地实现<br />
+              · 回测：信号次日开盘成交，含手续费与滑点，可对比买入持有基准<br />
+              · <b style="color:var(--warn)">风险提示：本工具仅用于量化研究，所有结果不构成投资建议。</b>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+  // 全局错误收集：供 --smoke 自检与问题排查
+  window.__errors = [];
+  window.addEventListener('error', (e) => window.__errors.push('error: ' + e.message));
+  window.addEventListener('unhandledrejection', (e) => window.__errors.push('reject: ' + e.reason));
+</script>
+<script src="js/chart.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

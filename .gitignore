@@ -1,0 +1,30 @@
+# 依赖
+node_modules/
+.cache/
+
+# 构建产物（dmg 通过 GitHub Release 分发）
+build/
+dist/
+*.dmg
+*.app/
+
+# npm 锁文件（本项目依赖通过国内镜像装配，lock 不完整）
+package-lock.json
+
+# Electron 二进制（由 scripts/setup-electron.sh 按需下载）
+electron-dist/
+
+# macOS
+.DS_Store
+._*
+
+# 日志
+*.log
+npm-debug.log*
+
+# 编辑器
+.vscode/
+.idea/
+
+# 本地缓存数据
+data/
