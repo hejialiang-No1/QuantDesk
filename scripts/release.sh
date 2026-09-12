@@ -2,9 +2,13 @@
 # 创建 GitHub Release 并上传 dmg
 set -e
 cd "$(dirname "$0")/.."
-export HTTPS_PROXY=socks5h://127.0.0.1:7890
-export HTTP_PROXY=socks5h://127.0.0.1:7890
+# 默认走本机 Clash 代理；如网络环境不同，用 RELEASE_PROXY 覆盖
+# （注意：不要直接读 HTTPS_PROXY，沙箱/CI 里常被设成一个不可用的本地代理）
+export HTTPS_PROXY="${RELEASE_PROXY:-socks5h://127.0.0.1:7890}"
+export HTTP_PROXY="${RELEASE_PROXY:-socks5h://127.0.0.1:7890}"
 TOKEN="$1"
+# node 仅用于解析 JSON，优先用 PATH 里的，退回到 WorkBuddy 托管版本（不要硬编码版本号）
+NODE_BIN="$(command -v node 2>/dev/null || ls -d /Users/hejialiang/.workbuddy/binaries/node/versions/*/bin/node 2>/dev/null | tail -1)"
 OWNER="hejialiang-No1"
 REPO="QuantDesk"
 TAG="v1.0.1"
@@ -23,7 +27,7 @@ REL=$(curl -s -m 60 -X POST \
     \"prerelease\": false
   }")
 
-REL_ID=$(echo "$REL" | /Users/hejialiang/.workbuddy/binaries/node/versions/22.22.2-2/bin/node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{const j=JSON.parse(s);if(j.id){console.log(j.id)}else{console.log('ERR:'+j.message)}})")
+REL_ID=$(echo "$REL" | "$NODE_BIN" -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{const j=JSON.parse(s);if(j.id){console.log(j.id)}else{console.log('ERR:'+j.message)}})")
 echo "    Release ID: $REL_ID"
 
 if [[ "$REL_ID" == ERR:* ]]; then
@@ -38,6 +42,6 @@ curl -s -m 900 --retry 3 --retry-delay 5 \
   -H "Content-Type: application/octet-stream" \
   --data-binary @"$DMG" \
   "https://uploads.github.com/repos/$OWNER/$REPO/releases/$REL_ID/assets?name=QuantDesk-1.0.1-arm64.dmg" \
-  | /Users/hejialiang/.workbuddy/binaries/node/versions/22.22.2-2/bin/node -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(s);if(j.id){console.log('    ✅ 上传成功:',j.name,(j.size/1048576).toFixed(1)+'MB','| 下载:',j.browser_download_url)}else{console.log('    ❌',j.message)}}catch(e){console.log('    RAW:',s.slice(0,200))}})"
+  | "$NODE_BIN" -e "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{try{const j=JSON.parse(s);if(j.id){console.log('    ✅ 上传成功:',j.name,(j.size/1048576).toFixed(1)+'MB','| 下载:',j.browser_download_url)}else{console.log('    ❌',j.message)}}catch(e){console.log('    RAW:',s.slice(0,200))}})"
 
 echo "[3/3] 完成: https://github.com/$OWNER/$REPO/releases/tag/$TAG"
