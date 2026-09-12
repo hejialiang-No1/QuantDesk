@@ -24,8 +24,10 @@ function mapRange(v, lo, hi) {
 /**
  * @param {Array} bars K线数组（时间正序）
  * @param {Object} quote 实时行情（可空）
+ * @param {number} ppy 每年多少根K线（日线 252 / 周线 52 / 月线 12），
+ *   用于年化波动率与「52 周」窗口。传错会让波动率成倍失真。
  */
-function analyze(bars, quote) {
+function analyze(bars, quote, ppy = 252) {
   if (!bars || bars.length < 60) return null;
   const closes = bars.map((b) => b.close);
   const highs = bars.map((b) => b.high);
@@ -51,12 +53,12 @@ function analyze(bars, quote) {
   const ret20 = I.ret(closes, 20);
   const ret60 = I.ret(closes, 60);
   const ret120 = I.ret(closes, 120);
-  const hi52 = I.highest(highs, Math.min(252, closes.length));
-  const lo52 = I.lowest(lows, Math.min(252, closes.length));
+  const hi52 = I.highest(highs, Math.min(ppy, closes.length));
+  const lo52 = I.lowest(lows, Math.min(ppy, closes.length));
   const distHigh = hi52 ? ((price - hi52) / hi52) * 100 : null;
   const volRatio = vma20[n] ? vma5[n] / vma20[n] : null;
   const atrPct = price && atr[n] ? (atr[n] / price) * 100 : null;
-  const vol = I.volatility(closes, 60);
+  const vol = I.volatility(closes, 60, ppy);
   const lastBar = bars[n];
   const prevBar = bars[n - 1] || lastBar;
   const dayChange = prevBar.close ? ((lastBar.close - prevBar.close) / prevBar.close) * 100 : null;

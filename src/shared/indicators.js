@@ -173,16 +173,23 @@
     return 0;
   }
 
-  /** 年化波动率（日收益标准差 × √252） */
-  function volatility(closes, n = 60) {
-    if (closes.length < n + 1) return null;
+  /**
+   * 年化波动率
+   * @param {number[]} closes 收盘价（时间正序）
+   * @param {number} n 取样根数
+   * @param {number} ppy 每年多少根K线 —— 日线 252 / 周线 52 / 月线 12。
+   *   这个参数必须跟K线周期一致，否则周线数据按 252 年化会把波动率放大 4 倍以上。
+   */
+  function volatility(closes, n = 60, ppy = 252) {
+    const k = Math.max(5, Math.min(n, closes.length - 1));
+    if (closes.length < k + 1) return null;
     const rs = [];
-    for (let i = closes.length - n; i < closes.length; i++) {
+    for (let i = closes.length - k; i < closes.length; i++) {
       rs.push(Math.log(closes[i] / closes[i - 1]));
     }
     const mean = rs.reduce((a, b) => a + b, 0) / rs.length;
     const varr = rs.reduce((a, b) => a + (b - mean) ** 2, 0) / (rs.length - 1);
-    return Math.sqrt(varr * 252) * 100;
+    return Math.sqrt(varr * ppy) * 100;
   }
 
   return { sma, ema, macd, rsi, boll, kdj, atr, volMa, ret, highest, lowest, cross, volatility };

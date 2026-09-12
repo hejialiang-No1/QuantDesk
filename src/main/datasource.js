@@ -53,6 +53,39 @@ function pct100(v) {
   const n = num(v);
   return n === null ? null : n / 100;
 }
+
+/**
+ * 估值倍数解析：东方财富用 0 表示「该市场没有这个数据」，
+ * 但 PE=0 在现实中不存在（亏损股是负数——那个是真实值，要保留）。
+ * 所以把 0 归一成 null，让上层显示 "--" 而不是误导性的 "0.00"。
+ * 实测（美股，105 市场）：f163≈TTM、f164≈动态、f167=市净率、f165≈市销率。
+ */
+function ratio(v) {
+  const n = num(v);
+  if (n === null || n === 0) return null;
+  return n / 100;
+}
+/** 按优先级取第一个有效值，兼容 A股(f9/f115) 与美股(f163/f164) 的不同挂载 */
+function pickRatio(...vals) {
+  for (const v of vals) {
+    const r = ratio(v);
+    if (r !== null) return r;
+  }
+  return null;
+}
+/** 原始倍数：腾讯/新浪返回的就是最终值，只需把 0 归成 null */
+function nonZero(v) {
+  const n = num(v);
+  return n === null || n === 0 ? null : n;
+}
+/** clist(fltt=2) 返回的已是格式化浮点数，不能再除以 100 */
+function pickFloat(...vals) {
+  for (const v of vals) {
+    const n = num(v);
+    if (n !== null && n !== 0) return n;
+  }
+  return null;
+}
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const makeSecid = (code, market) => `${market || MARKET.NASDAQ}.${String(code).toUpperCase()}`;
 const codeOf = (secid) => String(secid || '').split('.').slice(1).join('.');
@@ -207,6 +240,9 @@ function initCache(dir) {
 const EM_QUOTE_FIELDS = [
   'f43', 'f44', 'f45', 'f46', 'f47', 'f48', 'f57', 'f58', 'f59', 'f60',
   'f86', 'f116', 'f117', 'f162', 'f167', 'f168', 'f169', 'f170', 'f50',
+  // 市盈率在不同市场挂在不同字段上：f9/f114/f115 是 A 股口径，
+  // 美股要走 f164(动态)/f163(静态) 一类，一并取回来做择优。
+  'f9', 'f23', 'f114', 'f115', 'f163', 'f164', 'f165', 'f166', 'f173', 'f174',
 ].join(',');
 
 function emParse(d, secid) {
@@ -230,7 +266,11 @@ function emParse(d, secid) {
     prevClose, change, changePct,
     volume: num(d.f47), amount: num(d.f48),
     marketCap: num(d.f116) || null, floatCap: num(d.f117) || null,
-    pe: pct100(d.f162), pb: pct100(d.f167), turnover: pct100(d.f168),
+    // 美股 PE 挂在 f163(TTM)/f164(动态)，A股走 f9(动态)/f115(TTM)；f162 作兜底
+    pe: pickRatio(d.f163, d.f164, d.f162, d.f115, d.f9),
+    pb: pickRatio(d.f167, d.f23),
+    turnover: pct100(d.f168),
+    ps: ratio(d.f165),
     volumeRatio: pct100(d.f50), ts: num(d.f86), src: 'em', updatedAt: Date.now(),
   };
 }
@@ -290,7 +330,7 @@ async function emRank({ markets = [105, 106, 107], size = 200, page = 1, sortFie
   const buf = await httpGetHosts(
     EM_HOSTS,
     `/api/qt/clist/get?pn=${page}&pz=${size}&po=1&np=1&fltt=2&invt=2&fid=${sortField}` +
-      `&fs=${encodeURIComponent(fsq)}&fields=f12,f13,f14,f2,f3,f4,f5,f6,f20,f21,f116,f162`
+      `&fs=${encodeURIComponent(fsq)}&fields=f12,f13,f14,f2,f3,f4,f5,f6,f20,f21,f116,f162,f163,f164`
   );
   const j = JSON.parse(new TextDecoder('utf-8').decode(buf));
   const rows = j?.data?.diff;
@@ -298,7 +338,8 @@ async function emRank({ markets = [105, 106, 107], size = 200, page = 1, sortFie
   return rows.map((r) => ({
     secid: `${num(r.f13) || 105}.${r.f12}`, code: r.f12, market: num(r.f13) || 105,
     name: r.f14, price: num(r.f2), changePct: num(r.f3), change: num(r.f4),
-    volume: num(r.f5), amount: num(r.f6), marketCap: num(r.f20), pe: num(r.f162),
+    volume: num(r.f5), amount: num(r.f6), marketCap: num(r.f20),
+    pe: pickFloat(r.f163, r.f164, r.f162),
   })).filter((r) => r.code && r.price !== null);
 }
 
@@ -324,7 +365,7 @@ async function txQuote(secid) {
     price, open: num(a[5]), high: num(a[32]), low: num(a[33]), prevClose,
     change: num(a[30]), changePct: num(a[31]),
     volume: num(a[6]), amount: num(a[36]),
-    marketCap: null, pe: num(a[38]), turnover: num(a[42]),
+    marketCap: null, pe: nonZero(a[38]), turnover: nonZero(a[42]),
     high52: num(a[47]), low52: num(a[48]),
     ts: null, src: 'tx', updatedAt: Date.now(),
   };
@@ -371,7 +412,7 @@ async function sinaQuote(secid) {
     price, open: num(a[5]), high: num(a[6]), low: num(a[7]), prevClose,
     change: num(a[4]), changePct: num(a[2]),
     volume: num(a[10]), amount: num(a[30]),
-    marketCap: num(a[12]), pe: num(a[14]),
+    marketCap: num(a[12]), pe: nonZero(a[14]),
     high52: num(a[8]), low52: num(a[9]),
     ts: null, src: 'sina', updatedAt: Date.now(),
   };

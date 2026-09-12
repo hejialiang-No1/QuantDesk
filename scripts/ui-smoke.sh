@@ -1,7 +1,7 @@
 #!/bin/bash
 # 界面自检：启动 Electron，等待主流程跑完，输出体检结果
 cd "$(dirname "$0")/.." || exit 1
-export PATH="/Users/hejialiang/.workbuddy/binaries/node/versions/22.22.2-2/bin:$PATH"
+export PATH="/Users/hejialiang/.workbuddy/binaries/node/versions/22.22.2-3/bin:$PATH"
 LOG=/tmp/qd-smoke.log
 rm -f "$LOG"
 ./node_modules/.bin/electron . --smoke > "$LOG" 2>&1 &

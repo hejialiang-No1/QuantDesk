@@ -8,7 +8,7 @@
 set -e
 
 APP_NAME="QuantDesk"
-VER="1.0.0"
+VER="1.0.1"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build"
 SRC_APP="$ROOT/node_modules/electron/dist/Electron.app"

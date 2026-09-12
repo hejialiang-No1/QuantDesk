@@ -7,6 +7,10 @@ const { contextBridge, ipcRenderer } = require('electron');
 const Indicators = require('../shared/indicators');
 const Factors = require('../shared/factors');
 const Backtest = require('../shared/backtest');
+const Levels = require('../shared/levels');
+const TradePlan = require('../shared/tradeplan');
+const Diagnose = require('../shared/diagnose');
+const Options = require('../shared/options');
 
 const api = {
   // 应用
@@ -46,6 +50,10 @@ const api = {
   ind: Indicators,
   factors: Factors,
   bt: Backtest,
+  levels: Levels,
+  tradeplan: TradePlan,
+  diagnose: Diagnose,
+  options: Options,
 };
 
 contextBridge.exposeInMainWorld('qd', api);
