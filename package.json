@@ -1,8 +1,8 @@
 {
   "name": "quantdesk",
   "productName": "QuantDesk",
-  "version": "1.0.1",
-  "description": "QuantDesk - 美股量化终端 (US Equity Quant Terminal) v1.0.1",
+  "version": "1.0.2",
+  "description": "QuantDesk - 美股量化终端 (US Equity Quant Terminal) v1.0.2",
   "main": "src/main/main.js",
   "author": "hejialiang",
   "license": "MIT",

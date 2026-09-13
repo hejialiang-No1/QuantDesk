@@ -3,6 +3,80 @@
 QuantDesk 的所有重要变更都会记录在此。
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [1.0.2] - 2026-09-13
+
+### 新增
+
+- **美股市场规则引擎**（`src/shared/market.js`）
+  - 交易时段 / 假期 / 半日市 / EST–EDT 夏令时
+  - T+1 结算（2024-05-28 起生效）
+  - PDT（Pattern Day Trader）规则
+  - SSR（做空提价规则）与 LULD（限价涨跌停价格带）
+  - 市场熔断三级阈值
+  - 真实美股费用模型：SEC Section 31、FINRA TAF、交易所费、清算费、CAT 费
+  - 做空 / 盘前盘后 / 冰山 / TWAP / VWAP 等订单映射
+- **绩效归因与税务模块**（`src/shared/perf.js`、`src/shared/tax.js`）
+  - 年化收益 / 夏普 / 索提诺 / 卡玛 / 信息比率 / 最大回撤（含谷底、恢复天数、最长水下）
+  - VaR / CVaR、Beta / Alpha / 跟踪误差
+  - 归因：择时 / 选股 / 集中度 HHI
+  - FIFO 回合配对、Wash Sale（洗售）检测、短期 / 长期资本利得
+  - 1099-B / 1099-DIV / 1042-S 报税表归类、CSV 导出
+- **风控中心**（`src/shared/risk.js`）
+  - 账户级：日亏上限、最大回撤、总仓位、杠杆 / 购买力、PDT 提醒
+  - 策略级：单笔风险、单票上限、行业集中度、因子暴露、Beta / VaR、财报日 / 黑名单
+  - 做空专项：借券费率、挤空提示
+  - 安全评分 100 分制，下单前预检给出「通过 / 警告 / 拦截」
+- **模拟交易与撮合**（`src/shared/paper.js`）
+  - 订单状态机：pending / submitted / partially_filled / filled / cancelled / rejected / expired
+  - 市价 / 限价 / 止损 / 止损限价 / OCO / Bracket、TWAP / VWAP / 冰山
+  - 部分成交、滑点、买卖价差、T+1 待结算队列
+  - 对账（持仓 / 现金 / 订单状态差异分级）与上线就绪度 7 项清单
+  - 盘前盘后规则：休市下单会被明确拒绝
+- **券商适配与导出**（`src/shared/broker.js`）
+  - IBKR / Alpaca / Tradier / TradeStation / Schwab / E*TRADE 六家映射
+  - 订单字段差异抽象（`orderType` / `type` / `OrderType` / `priceType`）
+  - 只做「校验 + 导出 curl」两步，**不代下单**
+  - API Key 脱敏（尾 4 位）与断线重连策略
+- **选股器增强**（`src/shared/screener.js`）
+  - 标普 500 / 纳指 100 / 道指 30 / Russell 1000 / 热门美股 ETF / 自定义六类股票池
+  - 动量 / 价值 / 质量 / 低波 / 规模 / 盈利修正 六因子评分
+  - 参数扫描与多策略对比（支持显式排序指标）
+- **监控告警系统**（`src/shared/alerts.js` + `src/main/notify.js`）
+  - 16 种规则类型（价格 / 涨跌幅 / RSI / 成交量 / 日亏 / 回撤 / 仓位 / 波动率等）
+  - 10 类异常检测（订单失败 / 数据断流 / API 断线 / 持仓不一致等）
+  - 6 种推送渠道：Telegram、邮件、钉钉、企业微信、webhook、系统通知
+  - 邮件 SMTP 支持 465 隐式 TLS 与 587 STARTTLS
+  - 主进程轮询，窗口最小化不停止
+- **界面视图**：模拟交易、风控中心、监控告警、税务复盘四个新页面
+- **渲染层自检**：新增 `v1.0.2` 18 项断言，覆盖四个新视图与端到端往返
+
+### 变更
+
+- `store.js` 配置存储从浅展开改为深合并，避免修改一个阈值清空整组风控参数
+- 回测页面新增基准选择、订单类型、费用口径（us/simple）、止损 / 止盈 / 移动止盈 / 最大持仓日、T+1 / PDT / SSR 约束开关
+- 监控看板、异常列表、规则配置、推送渠道、审计日志统一到一个视图
+
+### 修复
+
+- `tax.js` 仅识别 `type` 字段，券商对账单用 `side` 时静默产出空报告
+- `screener.js` 多策略对比结果未排序，摘要「最优」与实际表格首行不一致
+- `paper.js` 市价单同时接收 `price`/`limitPrice`/`quote` 但只认前两个，导致行情字段传 `quote` 时报「价格无效」
+- `paper.js` 幂等键包含市价单的实时报价，报价一跳即可绕过重复提交拦截
+- `broker.js` 未校验 IBKR `conid`，发送到 Client Portal 会触发网关级晦涩错误
+- `market.js` PDT 窗口内对字符串 / 对象日期归一不统一，可能把「已超限」误判为「仍有额度」
+- `notify.js` SMTP AUTH LOGIN 少等一个 334，导致用户名 / 密码错位（看起来像密码错误）
+- `notify.js` STARTTLS 升级后重复发起 STARTTLS 死循环
+- `notify.js` 端口 465 硬编码 SSL 判定，非标 SSL 端口会走明文
+- 风控等级文案与实现不一致（`pass/block` 实为 `ok/warn/danger`，评分方向说反）
+- 监控看板金额格式化保留最多 3 位小数，整数感知的字段也显示多余小数位
+
+### 验证
+
+- 算法层自检 `npm run smoke`：**192 项全部通过**，新增 market / perf / tax / risk / paper / broker / screener / alerts 8 个模块
+- 渲染层自检 `--smoke`：`errors: []`，K 线交互 18 项通过，v1.0.2 新视图 18 项通过
+- 截图：`build/shots/` 共 19 张，覆盖新增四个视图
+- DMG 打包：`hdiutil verify` checksum VALID
+
 ## [1.0.1] - 2026-09-12
 
 ### 新增

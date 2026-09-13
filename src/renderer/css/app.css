@@ -1255,6 +1255,194 @@ canvas.equity { height: 240px; }
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
 
+/* ============================================================================
+   v1.0.2 —— 模拟交易 / 风控中心 / 监控告警 / 税务复盘
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- 因子图例（选股） */
+
+.factor-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+.fl-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: var(--r-m);
+  background: var(--glass-card);
+  box-shadow: var(--hair);
+}
+.fl-item .fl-name { font-size: 12px; font-weight: 600; }
+.fl-item .fl-type {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: var(--r-xs);
+  letter-spacing: 0.2px;
+}
+.fl-type.ok { background: rgba(48, 209, 88, 0.18); color: #5ee89a; }
+.fl-type.mid { background: rgba(255, 214, 10, 0.18); color: #ffe066; }
+.fl-type.warn { background: rgba(255, 159, 10, 0.2); color: #ffbf5c; }
+[data-theme="light"] .fl-type.ok { color: #10602b; }
+[data-theme="light"] .fl-type.mid { color: #6b4b00; }
+[data-theme="light"] .fl-type.warn { color: #8c4a00; }
+.fl-item .fl-desc { flex: 1 1 100%; font-size: 10.5px; color: var(--text-4); line-height: 1.55; }
+
+/* ---------------------------------------------------------------- 两栏布局 */
+
+.paper-cols, .tax-cols {
+  display: grid;
+  grid-template-columns: 1.35fr 1fr;
+  gap: 16px;
+}
+@media (max-width: 1180px) {
+  .paper-cols, .tax-cols { grid-template-columns: 1fr; }
+}
+
+/* ---------------------------------------------------------------- 事件日志 */
+
+.log-list { max-height: 340px; overflow: auto; }
+.log-row {
+  display: grid;
+  grid-template-columns: 62px 62px 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 7px 13px;
+  font-size: 11.5px;
+  box-shadow: inset 0 -0.5px 0 var(--sep);
+}
+.log-row:last-child { box-shadow: none; }
+.log-row .lg-time { color: var(--text-4); font-size: 10.5px; }
+.log-row .lg-type {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-3);
+}
+.log-row .lg-msg { color: var(--text-2); line-height: 1.55; }
+.log-row.lv-fill .lg-type { color: var(--up); }
+.log-row.lv-reject .lg-type { color: var(--red); }
+.log-row.lv-submit .lg-type { color: var(--accent); }
+.log-row.lv-settle .lg-type { color: var(--purple); }
+.log-row.lv-reconcile .lg-type { color: var(--orange); }
+.log-row.lv-duplicate .lg-type { color: var(--orange); }
+
+/* ---------------------------------------------------------------- 渠道卡片 */
+
+.ch-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+.ch-card {
+  padding: 12px;
+  border-radius: var(--r-l);
+  background: var(--glass-card);
+  box-shadow: var(--hair);
+  transition: box-shadow var(--fast), background var(--fast);
+}
+.ch-card.on { background: rgba(48, 209, 88, 0.07); box-shadow: inset 0 0 0 0.5px rgba(48, 209, 88, 0.3); }
+.ch-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ch-name { font-size: 12.5px; font-weight: 700; }
+.ch-note { font-size: 10.5px; line-height: 1.55; margin-top: 4px; }
+.ch-fields { margin-top: 10px; display: grid; gap: 6px; }
+.chf { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 8px; }
+.chf span { font-size: 11px; color: var(--text-3); }
+.chf .input { height: 26px; font-size: 11.5px; }
+.ch-foot { display: flex; gap: 8px; margin-top: 10px; }
+
+/* ---------------------------------------------------------------- 风控：行业条形 */
+
+.sector-bars { display: grid; gap: 7px; }
+.sb-row { display: grid; grid-template-columns: 92px 1fr 62px 160px; align-items: center; gap: 10px; font-size: 11.5px; }
+.sb-name { color: var(--text-2); text-align: right; }
+.sb-track {
+  position: relative;
+  height: 12px;
+  border-radius: var(--r-cap);
+  background: var(--glass-sunken);
+  overflow: hidden;
+}
+.sb-fill { display: block; height: 100%; border-radius: var(--r-cap); background: linear-gradient(90deg, var(--blue), var(--teal)); transition: width var(--mid); }
+.sb-fill.over { background: linear-gradient(90deg, var(--orange), var(--red)); }
+.sb-limit {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 1.5px;
+  background: var(--text-3);
+}
+.sb-val { font-family: var(--mono); text-align: right; }
+.sb-syms { font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ---------------------------------------------------------------- 风控：阈值表单 */
+
+.limit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px 16px;
+}
+.lmt { display: grid; grid-template-columns: 1fr 86px; align-items: center; gap: 8px; }
+.lmt .lmt-k { font-size: 11.5px; color: var(--text-2); }
+.lmt .input { height: 26px; font-size: 11.5px; }
+.lmt .lmt-h { grid-column: 1 / -1; font-size: 10px; margin-top: -4px; }
+
+/* ---------------------------------------------------------------- 风控：动作建议 */
+
+.action-list { display: grid; gap: 8px; }
+.action-row {
+  display: grid;
+  grid-template-columns: 72px 56px 1fr 150px;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: var(--r-m);
+  background: var(--glass-card);
+  box-shadow: var(--hair);
+  font-size: 11.5px;
+}
+.action-row .ac-act { font-weight: 700; font-size: 12px; }
+.action-row .ac-urg { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: var(--r-xs); text-align: center; }
+.action-row .ac-reason { color: var(--text-2); line-height: 1.55; }
+.action-row .ac-target { font-size: 10.5px; text-align: right; }
+.action-row.u-high { background: rgba(255, 69, 58, 0.09); box-shadow: inset 0 0 0 0.5px rgba(255, 69, 58, 0.26); }
+.action-row.u-high .ac-urg { background: rgba(255, 69, 58, 0.22); color: #ff8a94; }
+.action-row.u-medium { background: rgba(255, 159, 10, 0.08); box-shadow: inset 0 0 0 0.5px rgba(255, 159, 10, 0.24); }
+.action-row.u-medium .ac-urg { background: rgba(255, 159, 10, 0.2); color: #ffbf5c; }
+.action-row.u-low .ac-urg { background: var(--glass-raise); color: var(--text-3); }
+[data-theme="light"] .action-row.u-high .ac-urg { color: #a3000f; }
+[data-theme="light"] .action-row.u-medium .ac-urg { color: #8c4a00; }
+
+/* ---------------------------------------------------------------- 税务：标签页 */
+
+.tabs { display: inline-flex; gap: 2px; padding: 3px; border-radius: var(--r-cap); background: var(--glass-sunken); }
+.tabs button {
+  height: 26px;
+  padding: 0 14px;
+  border: none;
+  border-radius: var(--r-cap);
+  background: transparent;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background var(--fast), color var(--fast);
+}
+.tabs button:hover { color: var(--text); }
+.tabs button.on { background: var(--glass-raise); color: var(--text); box-shadow: var(--hi-top), var(--hair); }
+
+/* ---------------------------------------------------------------- 按钮状态补充 */
+
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn.sm.danger { height: 22px; padding: 0 10px; font-size: 10.5px; }
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
 }

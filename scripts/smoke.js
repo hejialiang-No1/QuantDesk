@@ -12,6 +12,15 @@ const Lv = require('../src/shared/levels');
 const TP = require('../src/shared/tradeplan');
 const DG = require('../src/shared/diagnose');
 const OPT = require('../src/shared/options');
+// v1.0.2
+const Mkt = require('../src/shared/market');
+const Perf = require('../src/shared/perf');
+const Tax = require('../src/shared/tax');
+const Risk = require('../src/shared/risk');
+const Paper = require('../src/shared/paper');
+const Broker = require('../src/shared/broker');
+const Screener = require('../src/shared/screener');
+const Alerts = require('../src/shared/alerts');
 
 ds.initCache(path.join(os.tmpdir(), 'quantdesk-smoke-cache'));
 
@@ -311,6 +320,308 @@ function ok(name, cond, extra) {
   // 13) 边界：数据不足
   const short = BT.run({ bars: bars.slice(0, 20), strategy: 'ma_cross' });
   check('数据不足时返回错误提示', !!short.error, short.error || '');
+
+  // ============================================================
+  //  v1.0.2 新增模块自检（全部离线，不依赖网络）
+  // ============================================================
+
+  // 14) 美股市场规则
+  console.log('\n--- 美股市场规则（market.js） ---');
+  {
+    const h26 = Mkt.holidays(2026).map((x) => x.date);
+    const mustHave = ['2026-01-01', '2026-07-03', '2026-11-26', '2026-12-25'];
+    check(
+      '2026 年假期含元旦/独立日/感恩节/圣诞',
+      mustHave.every((d) => h26.includes(d)),
+      `${h26.length} 个假期`
+    );
+    check('2026-09-12（周六）非交易日', Mkt.isTradingDay('2026-09-12') === false);
+    check('2026-11-26（感恩节）非交易日', Mkt.isTradingDay('2026-11-26') === false);
+    const hd = Mkt.halfDays(2026).map((x) => x.date);
+    check('2026 半日市为 11-27 与 12-24', hd.includes('2026-11-27') && hd.includes('2026-12-24'), hd.join(', '));
+    check('2025-07-03 是半日市（独立日前夕）', Mkt.halfDays(2025).some((x) => x.date === '2025-07-03'));
+
+    const summer = Mkt.session(new Date('2026-09-11T14:00:00Z')); // 10:00 ET
+    check('9 月为夏令时 EDT（偏移 -4）', summer.dst === true && summer.etOffset === -4, `ET ${summer.et}`);
+    const winter = Mkt.session(new Date('2026-12-11T15:00:00Z')); // 10:00 ET
+    check('12 月为冬令时 EST（偏移 -5）', winter.dst === false && winter.etOffset === -5, `ET ${winter.et}`);
+    check('同时刻夏令时 phase=regular', summer.phase === 'regular', summer.label);
+
+    // T+1：周五卖出 → 下周一结算
+    const st = Mkt.settleDate('2026-09-11');
+    check('周五卖出 T+1 结算落到下周一', st.date === '2026-09-14', `${st.date}（${st.weekdayName}）`);
+
+    // PDT：窗口由 asOf 倒推 5 个交易日（2026-09-07 劳动节应被跳过）
+    const pdtWin = Mkt.pdtCheck([], 20000, new Date('2026-09-11T14:00:00Z'));
+    check('PDT 窗口为最近 5 个交易日且跳过 9/7 劳动节', pdtWin.windowDays.length === 5 && !pdtWin.windowDays.includes('2026-09-07'), pdtWin.windowDays.join(','));
+    const used3 = pdtWin.windowDays.slice(-3).map((d) => ({ date: d }));
+    const pdt1 = Mkt.pdtCheck(used3, 20000, new Date('2026-09-11T14:00:00Z'));
+    check('净值 < $25k 且已用 3 次 → 第 4 次触发 PDT', pdt1.willTrigger === true && pdt1.count === 3, pdt1.note);
+    const pdt2 = Mkt.pdtCheck(used3, 30000, new Date('2026-09-11T14:00:00Z'));
+    check('净值 ≥ $25k 不受 PDT 限制', pdt2.willTrigger === false);
+    // 三种输入口径（对象 / 裸日期 / 带时间戳）必须得到同一结论
+    const pdtFlat = Mkt.pdtCheck(pdtWin.windowDays.slice(-3), 20000, new Date('2026-09-11T14:00:00Z'));
+    const pdtIso = Mkt.pdtCheck(pdtWin.windowDays.slice(-3).map((d) => d + 'T14:00:00Z'), 20000, new Date('2026-09-11T14:00:00Z'));
+    check('PDT 容忍对象 / 裸日期 / 带时间戳三种入参', pdtFlat.willTrigger === true && pdtIso.willTrigger === true, `对象 ${pdt1.count} / 裸 ${pdtFlat.count} / ISO ${pdtIso.count}`);
+
+    check('前日跌 12% → SSR 生效', Mkt.ssrCheck(105, 92).active === true);
+    check('前日跌 5% → SSR 不生效', Mkt.ssrCheck(105, 99.75).active === false);
+    const lb = Mkt.luldBands(120, 1);
+    check('Tier 1 价格带 ±5%', Math.abs(lb.upper - 126) < 1e-6 && Math.abs(lb.lower - 114) < 1e-6, `$ ${lb.lower}–${lb.upper}`);
+    check('-8% 触发一级熔断', Mkt.circuitBreaker(-8).level === 1);
+    check('-21% 触发三级熔断', Mkt.circuitBreaker(-21).level === 3);
+    check('-4% 不触发熔断', Mkt.circuitBreaker(-4).triggered === false);
+
+    // 费用：卖出 1000 股 @$200 = $200,000
+    const fee = Mkt.computeFees({ side: 'sell', shares: 1000, price: 200 });
+    const expectSec = 200000 * 0.0000278;
+    check('SEC 费 = 成交额 × $27.80/百万', Math.abs(fee.sec - expectSec) < 0.01, `$${fee.sec.toFixed(2)}`);
+    check('FINRA TAF = 股数 × $0.000166', Math.abs(fee.taf - 0.166) < 1e-9, `$${fee.taf}`);
+    check('买入不收 SEC 与 TAF', Mkt.computeFees({ side: 'buy', shares: 1000, price: 200 }).sec === 0);
+    check('TAF 单笔封顶 $8.3', Mkt.computeFees({ side: 'sell', shares: 100000, price: 200 }).taf <= 8.3);
+
+    const preMarket = { phase: 'pre', label: '盘前', day: {}, et: '05:00' };
+    check('盘前不允许市价单', Mkt.orderAvailability('market', preMarket).ok === false);
+    check('盘前允许限价单', Mkt.orderAvailability('limit', preMarket).ok === true);
+    check('常规时段允许市价单', Mkt.orderAvailability('market', summer).ok === true);
+
+    const up = Mkt.upcoming(new Date('2026-09-11T14:00:00Z'));
+    check('upcoming 能给出下一交易日与下一假期', !!up.nextTradingDay && !!up.nextHoliday, `下一交易日 ${up.nextTradingDay}`);
+  }
+
+  // 15) 绩效归因
+  console.log('\n--- 绩效与归因（perf.js） ---');
+  {
+    // 构造一段已知回撤：100 → 120 → 90 → 110
+    const eq = [
+      { date: '2025-01-02', value: 100 },
+      { date: '2025-01-03', value: 120 },
+      { date: '2025-01-06', value: 90 },
+      { date: '2025-01-07', value: 110 },
+    ];
+    const dd = Perf.drawdown(eq);
+    check('最大回撤 =(120-90)/120 = 25%', Math.abs(dd.maxDrawdown - 25) < 1e-6, `${dd.maxDrawdown.toFixed(2)}%`);
+    check('回撤谷底日期正确', dd.troughDate === '2025-01-06', dd.troughDate);
+
+    const r = BT.run({ bars, strategy: 'ma_cross', benchBars: bars.map((b) => ({ ...b, close: b.close * 0.99 })), benchName: 'SPY' });
+    const p = r.perf;
+    check('回测返回完整绩效对象', !!p && isFinite(p.cagr) && isFinite(p.annualVol), `CAGR ${p.cagr.toFixed(1)}%`);
+    check('夏普与索提诺口径一致（索提诺分母仅下行）', isFinite(p.sharpe) && isFinite(p.sortino));
+    // CVaR 是「超过 VaR 的那部分尾部损失的均值」，方向必须是 CVaR ≥ VaR（都用正数表示亏损）
+    check('VaR95 与 CVaR 存在且尾部均值 CVaR ≥ VaR', isFinite(p.var95.var) && p.var95.cvar >= p.var95.var - 1e-9, `VaR ${p.var95.var.toFixed(2)}% / CVaR ${p.var95.cvar.toFixed(2)}%`);
+    check('基准对比返回 Beta / 跟踪误差 / 信息比率', !!p.vs && isFinite(p.vs.beta) && isFinite(p.vs.trackingError));
+    check('指标卡数组非空（界面直接渲染）', Perf.cards(p).length >= 10, `${Perf.cards(p).length} 张卡`);
+    check('归因包含标的与行业贡献', !!p.attribution && !!p.attribution.topContributor);
+    check('换手率与成本拖累有值', p.turnover && isFinite(p.turnover.annual), `年化换手 ${p.turnover.annual.toFixed(0)}%`);
+  }
+
+  // 16) 税务
+  console.log('\n--- 税务（tax.js） ---');
+  {
+    const trades = [
+      { symbol: 'AAPL', side: 'BUY', shares: 100, price: 90, date: '2024-06-01', fee: 1 },
+      { symbol: 'AAPL', side: 'SELL', shares: 100, price: 180, date: '2025-06-15', fee: 1 },
+      { symbol: 'NVDA', side: 'sell', shares: 50, price: 400, date: '2025-03-01', fee: 1 },
+      { symbol: 'NVDA', side: 'sell', shares: 50, price: 380, date: '2025-05-01', fee: 1 },
+      { symbol: 'NVDA', side: 'buy', shares: 50, price: 390, date: '2025-04-25', fee: 1 },
+    ];
+    const rep = Tax.report({ trades, year: 2025 });
+    check('跨年持仓也能正确配对成本（先配对再筛年）', rep.lots.length >= 2, `${rep.lots.length} 个回合`);
+    const aapl = rep.lots.find((l) => l.symbol === 'AAPL');
+    check('AAPL 持有 379 天 → 长期', aapl && aapl.term === 'long' && aapl.holdDays === 379, aapl ? `${aapl.holdDays} 天 / ${aapl.term}` : 'missing');
+    check('券商口径的 side 字段也能识别（不只认 type）', !!aapl, 'side=BUY/SELL 已归一');
+    check('洗售检测生效（NVDA 亏损后 6 天内买回）', rep.washSale.totalDisallowed > 0, `被洗 $${rep.washSale.totalDisallowed}`);
+    check('应税净额已加回被洗亏损', rep.classify.taxable.net !== rep.classify.netCapitalGain || rep.washSale.totalDisallowed === 0);
+    check('1099-B 归类有行', rep.forms.b1099.count > 0, `${rep.forms.b1099.count} 行`);
+    const div = Tax.report({ trades: [], dividends: [{ symbol: 'AAPL', gross: 120, date: '2025-05-10', withholding: 12 }], year: 2025 });
+    check('股息按中美协定 10% 预扣', div.dividend.withholding === 12 && div.dividend.rate === 10);
+    check('1042-S 归类有行', div.forms.s1042.count > 0);
+    check('中国境外所得 20% 与抵免能算出', div.china.netPayable === 12, `应补 $${div.china.netPayable}`);
+    check('CSV 导出非空且含表头', Tax.toCsv(rep.lots).split('\n').length >= 2);
+  }
+
+  // 17) 风控
+  console.log('\n--- 风控（risk.js） ---');
+  {
+    const acc = { equity: 100000, cash: 40000, dayStartEquity: 101000, peakEquity: 105000 };
+    const pos = [
+      { symbol: 'NVDA', shares: 200, price: 180, avgCost: 150, side: 'long', sector: '科技', beta: 1.6, vol: 0.45 },
+      { symbol: 'XOM', shares: 100, price: 110, avgCost: 115, side: 'long', sector: '能源', beta: 0.8, vol: 0.25 },
+    ];
+    const ev = Risk.evaluate({ account: acc, positions: pos, limits: {}, dayTrades: [] });
+    check('单票 36% 超 15% 上限 → 硬拦截', ev.blocks.some((b) => b.key === 'singlePosition'), ev.headline);
+    check('行业 36% 超 35% → 警告', ev.warns.some((b) => b.key === 'sector'));
+    check('红灯等级与安全评分联动', ev.level === 'danger' && ev.score === 100 - 25 * ev.blocks.length - 8 * ev.warns.length, `score ${ev.score}`);
+    // 敞口 = NVDA 200×180 + XOM 100×110 = 47000 → 净值的 47%
+    check('敞口计算：总仓位 47%（47000/100000）', Math.abs(ev.exposure.grossPct - 47) < 1e-6, `gross ${ev.exposure.grossPct}%`);
+    check('现金比例 40% 与最低现金约束一致', Math.abs(ev.exposure.cashPct - 40) < 1e-6);
+    check('给出可执行的减仓建议', ev.actions.some((a) => a.action === '减仓'), `${ev.actions.length} 条建议`);
+
+    const clean = Risk.evaluate({ account: { equity: 100000, cash: 100000, dayStartEquity: 100000, peakEquity: 100000 }, positions: [], limits: {} });
+    check('空仓时绿灯且满分', clean.level === 'ok' && clean.score === 100, clean.headline);
+
+    const pre = Risk.preTrade({
+      order: { symbol: 'TSLA', side: 'buy', shares: 100, price: 250 },
+      account: { equity: 100000, cash: 1000, buyingPower: 1000, dayStartEquity: 100000, peakEquity: 100000 },
+      positions: [], dayTrades: [], limits: {},
+    });
+    check('下单前预检：购买力不足被拦', pre.passed === false && pre.blocks.some((b) => /购买力/.test(b.title)), pre.blocks.map((b) => b.title).join('、'));
+    const pre2 = Risk.preTrade({
+      order: { symbol: 'TSLA', side: 'buy', shares: 10, price: 250, stopPrice: 230 },
+      account: { equity: 100000, cash: 100000, buyingPower: 100000, dayStartEquity: 100000, peakEquity: 100000 },
+      positions: [], dayTrades: [], limits: {},
+    });
+    check('止损已设时给通过项（含止损字样）', pre2.passes.some((p) => /止损/.test(p.title)), pre2.passes.map((p) => p.title).join('、'));
+    const pre3 = Risk.preTrade({
+      order: { symbol: 'TSLA', side: 'buy', shares: 10, price: 250 },
+      account: { equity: 100000, cash: 100000, buyingPower: 100000, dayStartEquity: 100000, peakEquity: 100000 },
+      positions: [], dayTrades: [], limits: {},
+    });
+    check('不设止损会被警告（但不是拦截）', pre3.warns.some((w) => /止损/.test(w.title)) && pre3.passed === true, pre3.summary);
+    check('预检返回三段结论（阻截/警告/通过）', Array.isArray(pre2.blocks) && Array.isArray(pre2.warns) && Array.isArray(pre2.passes));
+  }
+
+  // 18) 模拟盘
+  console.log('\n--- 模拟交易（paper.js） ---');
+  {
+    const pa = new Paper.PaperAccount({ initialCash: 100000 });
+    const reg = { phase: 'regular', label: '常规', trading: true, et: '10:00', day: {} };
+
+    // 默认风控单票上限 15%：100 股 NVDA（$18000）占净值 18%，必须先被拦住。
+    // 这一条保证「风控真的在下单路径上」，不是摆设。
+    const tooBig = pa.submit({ symbol: 'NVDA', side: 'buy', type: 'market', shares: 100, quote: 180, session: reg });
+    check('默认单票上限 15% 拦住 18% 的仓位', tooBig.ok === false && tooBig.blocked.some((b) => /单票/.test(b.title)), tooBig.order.reason);
+
+    // 50 股（$9000，9%）在限额内，应当被受理
+    const o1 = pa.submit({ symbol: 'NVDA', side: 'buy', type: 'market', shares: 50, quote: 180, session: reg });
+    check('常规时段市价单被受理', o1.ok && o1.order.status === 'submitted', o1.ok ? o1.order.status : o1.order.reason);
+    const o1b = pa.submit({ symbol: 'NVDA', side: 'buy', type: 'market', shares: 50, quote: 180, session: reg });
+    check('重复提交被幂等拦截', o1b.duplicate === true);
+    // 行情跳动不能骗过幂等（市价单的价格不进幂等键）
+    const o1c = pa.submit({ symbol: 'NVDA', side: 'buy', type: 'market', shares: 50, quote: 181.5, session: reg });
+    check('市价单换了个报价仍算同一意图（价格不进幂等键）', o1c.duplicate === true);
+
+    const mk = pa.mark({ NVDA: { date: '2025-06-02', open: 180, high: 190, low: 178, close: 185, volume: 1e6 } }, { date: '2025-06-02', session: reg, slippageBps: 0 });
+    check('撮合产生成交', mk.fills.length === 1, `${mk.fills.length} 笔`);
+    check('成交后持仓落账（股数与均价）', pa.positions.length === 1 && Math.abs(pa.positions[0].shares - 50) < 1e-9, pa.positions[0] ? `均价 ${pa.positions[0].avgPrice.toFixed(2)}` : `持仓 ${pa.positions.length} 笔`);
+    check('成交后现金减少', pa.cash < 100000, `现金 $${pa.cash.toFixed(2)}`);
+    const t0 = pa.trades[0];
+    check('成交记录含费用分项', !!t0 && t0.fee > 0, t0 ? `费用 ${t0.fee.toFixed(2)}` : '无成交');
+
+    const bad = pa.submit({ symbol: 'AAPL', side: 'sell', type: 'market', shares: 10, quote: 200, session: reg });
+    check('无持仓卖出被拒（可平数量校验）', bad.ok === false && /可平数量/.test(bad.order.reason), bad.order.reason);
+
+    // 平仓 + T+1 结算
+    const o2 = pa.submit({ symbol: 'NVDA', side: 'sell', type: 'market', shares: 50, quote: 200, session: reg });
+    check('有持仓时卖出被受理', o2.ok === true);
+    pa.mark({ NVDA: { date: '2025-06-03', open: 195, high: 205, low: 193, close: 200, volume: 1e6 } }, { date: '2025-06-03', session: reg, slippageBps: 0 });
+    check('平仓后持仓清零', pa.positions.length === 0);
+    const tLast = pa.trades[pa.trades.length - 1];
+    check('平仓记录带盈亏与持有天数', !!tLast && tLast.profit != null, tLast && tLast.profit != null ? `盈亏 ${tLast.profit.toFixed(2)}` : '无平仓记录');
+    check('卖出资金进入 T+1 待结算队列', pa.pendingSettlements.length === 1, pa.pendingSettlements[0] ? `结算日 ${pa.pendingSettlements[0].settleDate}` : '队列为空');
+    const set0 = pa.settle('2025-06-03');
+    check('未到期不释放', set0.released === 0);
+    const set1 = pa.settle('2025-06-04');
+    check('到期后释放结算资金', set1.released > 0, `释放 $${set1.released.toFixed(2)}`);
+
+    const rc = pa.reconcile({ cash: 1, positions: [], orders: [] });
+    check('对账能发现现金与持仓差异', rc.ok === false && rc.diffs.length >= 1, rc.summary);
+    const rc2 = pa.reconcile({ cash: pa.cash, positions: [], orders: [] });
+    check('一致时对账通过', rc2.ok === true, rc2.summary);
+    const rd = Paper.readiness(pa);
+    check('上线就绪度清单有 7 项并给出结论', rd.total === 7 && !!rd.verdict, `${rd.passed}/${rd.total}`);
+
+    const pa2 = new Paper.PaperAccount({ initialCash: 100000 });
+    const sh = pa2.submit({ symbol: 'TSLA', side: 'short', type: 'market', shares: 10, quote: 250, session: reg });
+    check('开空被受理', sh.ok === true);
+    pa2.mark({ TSLA: { date: '2025-06-02', open: 250, high: 255, low: 245, close: 250, volume: 1e6 } }, { date: '2025-06-02', session: reg, slippageBps: 0 });
+    check('开空后持仓方向为 short', pa2.positions[0] && pa2.positions[0].side === 'short', pa2.positions[0] ? pa2.positions[0].side : '无持仓');
+    pa2.submit({ symbol: 'TSLA', side: 'cover', type: 'market', shares: 10, quote: 240, session: reg });
+    pa2.mark({ TSLA: { date: '2025-06-03', open: 240, high: 245, low: 235, close: 240, volume: 1e6 } }, { date: '2025-06-03', session: reg, slippageBps: 0 });
+    check('买平空后持仓清零且方向未错', pa2.positions.length === 0, `已实现盈亏 $${pa2.realizedPnl.toFixed(2)}`);
+    check('空头下跌应盈利', pa2.realizedPnl > 0);
+
+    const closed = new Paper.PaperAccount({ initialCash: 100000 });
+    const r0 = closed.submit({ symbol: 'AAPL', side: 'buy', type: 'market', shares: 10, quote: 200, session: { phase: 'closed', label: '休市', day: {}, et: '22:00' } });
+    check('休市时段下单被拒（不靠时间猜）', r0.ok === false && /休市/.test(r0.order.reason), r0.order.reason);
+  }
+
+  // 19) 券商适配
+  console.log('\n--- 券商适配（broker.js） ---');
+  {
+    check('内置 6 家券商', Broker.VENUES.length === 6, Broker.VENUES.map((v) => v.short).join(' '));
+    const alpaca = Broker.mapOrder('alpaca', { symbol: 'NVDA', side: 'buy', type: 'limit', shares: 10, price: 180, tif: 'day' }, {});
+    check('Alpaca 字段为 type / qty / time_in_force', alpaca.body.type === 'limit' && alpaca.body.qty && alpaca.body.time_in_force, JSON.stringify(alpaca.body).slice(0, 90));
+    const ts = Broker.mapOrder('tradestation', { symbol: 'NVDA', side: 'buy', type: 'limit', shares: 10, price: 180, tif: 'day' }, {});
+    check('TradeStation 用 OrderType 字段（大小写坑）', !!ts.body.OrderType, JSON.stringify(ts.body).slice(0, 90));
+    const ib = Broker.mapOrder('ibkr', { symbol: 'NVDA', side: 'buy', type: 'market', shares: 10, tif: 'day' }, {});
+    // IBKR Client Portal 的订单体是 { orders: [ {...} ] } 包一层，字段是 orderType
+    check('IBKR 用 orders 数组包一层且字段为 orderType', Array.isArray(ib.body.orders) && ib.body.orders[0].orderType === 'MKT', JSON.stringify(ib.body).slice(0, 90));
+    check('IBKR 缺 conid 时报错并给出查合约号的路径', (() => {
+      const v = Broker.validate('ibkr', { symbol: 'NVDA', side: 'buy', type: 'market', shares: 10 }, { accountId: 'U1', credentials: { token: 't' } });
+      return v.ok === false && v.errors.some((e) => /conid/.test(e.title) && /secdef\/search/.test(e.detail));
+    })());
+    const v = Broker.validate('alpaca', { symbol: 'NVDA', side: 'buy', type: 'buy', shares: 0 }, {});
+    check('非法订单被前置校验拦下', v.ok === false && v.errors.length > 0, v.errors.map((e) => e.title || e).join('、'));
+    check('凭证脱敏只留尾 4 位', Broker.maskCredential('PKABCDEFG1234').endsWith('1234'));
+    check('幂等与重连策略有内容', Broker.reliability('ibkr').pitfalls.length > 0);
+    check('默认定时任务为 6 项', Broker.defaultTasks().length === 6);
+    const curl = Broker.toCurl(alpaca);
+    check('可导出 curl 便于手工核对', typeof curl === 'string' && curl.includes('curl'), curl.slice(0, 40));
+  }
+
+  // 20) 选股器与参数扫描
+  console.log('\n--- 选股器（screener.js） ---');
+  {
+    const us = Screener.universes(['NVDA']);
+    check('内置股票池 ≥ 8 个', Object.keys(us).length >= 8, Object.keys(us).join(' '));
+    check('标普池成分数 ≥ 60', us.sp500.codes.length >= 60, `${us.sp500.codes.length} 只`);
+    check('自选池绑定传入的代码', us.watch.codes[0] === 'NVDA');
+    const f = Screener.computeFactors({ bars, quote: { pe: 25, marketCap: 1e11 }, rank: { capPercentile: 40 } });
+    check('六因子全部产出且 0–100', f && Object.keys(f.scores).length === 6 && Object.values(f.scores).every((v) => v >= 0 && v <= 100), JSON.stringify(f.scores));
+    check('因子类型诚实标注（quality/revision 为代理）', Screener.FACTORS.find((x) => x.key === 'quality').type === 'proxy');
+    const ps = Screener.paramScan(bars, 'ma_cross', { fast: [5, 10], slow: [20, 30] }, { backtestFn: BT, metric: 'sharpe' });
+    check('参数扫描产出有效组合与稳健性判断', ps.valid === 4 && typeof ps.robust === 'boolean', `${ps.valid} 组 · ${ps.robust ? '平坦' : '孤峰'}`);
+    check('缺 backtestFn 时如实报错而非静默返回空', Screener.paramScan(bars, 'ma_cross', { a: [1] }, {}).error === '缺少回测函数');
+    const cmp = Screener.compare(bars, ['ma_cross', 'rsi'], { backtestFn: BT });
+    check('多策略对比默认按夏普降序', cmp.metric === 'sharpe' && cmp.rows.length === 2 && (cmp.rows[0].sharpe == null || cmp.rows[0].sharpe >= cmp.rows[1].sharpe), cmp.summary);
+    const cmp2 = Screener.compare(bars, ['ma_cross', 'rsi'], { backtestFn: BT, metric: 'totalReturn' });
+    check('指定 metric=totalReturn 时按收益降序', cmp2.metric === 'totalReturn' && cmp2.rows[0].totalReturn >= cmp2.rows[1].totalReturn, cmp2.summary);
+    check('回撤类指标按「越小越好」排序', Screener.compare(bars, ['ma_cross', 'rsi'], { backtestFn: BT, metric: 'maxDrawdown' }).metricLabel.includes('越小越好'));
+  }
+
+  // 21) 告警
+  console.log('\n--- 告警（alerts.js） ---');
+  {
+    check('16 种规则类型', Alerts.RULE_TYPES.length === 16, `${Alerts.RULE_TYPES.length} 种`);
+    check('10 种异常检测', Alerts.ANOMALY_TYPES.length === 10);
+    check('6 个推送渠道', Alerts.CHANNELS.length === 6, Alerts.CHANNELS.map((c) => c.name).join(' '));
+    const hit = Alerts.evalRule(
+      { id: 'r1', type: 'price_above', symbol: 'NVDA', value: 170, severity: 'high', enabled: true },
+      { quotes: { NVDA: { price: 180, changePct: 3 } } }
+    );
+    check('价格上破命中且标题带单位', !!hit && hit.title === 'NVDA 价格上破 $170', hit ? hit.title : '未命中');
+    check('未达阈值不误报', Alerts.evalRule({ id: 'r2', type: 'price_above', symbol: 'NVDA', value: 190 }, { quotes: { NVDA: { price: 180 } } }) === null);
+    const dl = Alerts.evalRule({ id: 'r3', type: 'daily_loss', value: 3 }, { account: { equity: 96000, dayStartEquity: 100000 } });
+    check('单日亏损 4% 命中 3% 阈值', !!dl, dl ? dl.title : '');
+    const an = Alerts.detectAnomalies({ now: Date.now(), lastQuoteAt: new Date(Date.now() - 300000).toISOString(), quoteStaleMs: 90000 });
+    check('行情 5 分钟未更新 → 数据断流告警', an.anomalies.some((a) => a.key === 'data_stale'), an.summary);
+    const an2 = Alerts.detectAnomalies({ now: Date.now(), lastQuoteAt: new Date().toISOString(), apiFailures: 0 });
+    check('正常时无异常', an2.healthy === true);
+    for (const ch of Alerts.CHANNELS) {
+      const cfg = {};
+      (ch.fields || []).forEach((f) => (cfg[f.key] = 'x'));
+      const pl = Alerts.payload(ch.key, cfg, { level: 'warn', title: 'T', detail: 'D' });
+      check(`渠道 ${ch.name} 载荷可生成`, pl.ok === true, pl.method + ' ' + (pl.url || '').slice(0, 46));
+    }
+    const missing = Alerts.payload('telegram', {}, { level: 'info', title: 'T' });
+    check('配置缺失时如实报错并给出预览', missing.ok === false && !!missing.preview);
+    const hb = Alerts.heartbeat({ lastBeatAt: Date.now() - 1000, intervalMs: 30000 });
+    check('心跳正常判定', hb.alive === true, hb.label);
+    const hb2 = Alerts.heartbeat({ lastBeatAt: Date.now() - 200000, intervalMs: 30000 });
+    check('心跳丢失判定', hb2.alive === false, hb2.label);
+    check('默认规则 5 条', Alerts.defaultRules().length === 5);
+  }
 
   console.log(`\n===== 通过 ${pass} 项，失败 ${fail} 项 =====\n`);
   process.exit(fail ? 1 : 0);

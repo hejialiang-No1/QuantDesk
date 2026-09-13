@@ -44,8 +44,20 @@ ls node_modules/electron/dist/ | head -3
 BIN="node_modules/electron/dist/Electron.app/Contents/MacOS/Electron"
 [ -x "$BIN" ] && echo "==> 二进制就绪：$BIN" || { echo "!! 二进制缺失"; exit 1; }
 chmod +x "$BIN"
-# 让 ./node_modules/.bin/electron 也能用（npm 默认创建符号链接指向 index.js）
-mkdir -p node_modules/.bin
-ln -sf ../electron/index.js node_modules/.bin/electron
 
+# 让 ./node_modules/.bin/electron 也能用。
+# 注意：不能 SymbolicLink 到 electron/index.js —— 那个文件只是 CommonJS 模块（导出路径字符串），
+# 没有 shebang，直接执行会 permission denied；官方 npm 包用的是另一个 cli.js。
+# 这里写一个三行的包装脚本，另外顺手 unset ELECTRON_RUN_AS_NODE：
+# 本机环境默认带 ELECTRON_RUN_AS_NODE=1，会让 Electron 退化成纯 Node 执行 main.js，
+# 报 `Cannot read properties of undefined (reading 'whenReady')` —— 这个坑极难从报错反推。
+mkdir -p node_modules/.bin
+cat > node_modules/.bin/electron <<'SH'
+#!/bin/bash
+unset ELECTRON_RUN_AS_NODE
+exec "$(cd "$(dirname "$0")/../electron" && pwd)/dist/Electron.app/Contents/MacOS/Electron" "$@"
+SH
+chmod +x node_modules/.bin/electron
+
+echo "==> 自检：$(./node_modules/.bin/electron --version 2>&1 | head -1)（应为 Electron 版本号，不是 Node 版本号）"
 echo "==> Electron ${VER} 装配完成"
