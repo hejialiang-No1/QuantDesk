@@ -95,6 +95,15 @@
     preset: '',             // 选股页当前选中的预设策略
     scanColumns: 'classic', // 经典视图 / 因子视图
     screenResult: null,     // 最近一次预设筛选的结果
+
+    // ---- v1.2.0 大批量扫描
+    scanLimits: [50, 100, 150, 200, 300, 500, 1000],
+    scanEstimates: {},      // 档位 → 预计耗时（ms），来自主进程
+    scanPage: 1,
+    scanPageSize: 100,      // 每页行数：1000 行全渲染会让滚动与排序明显卡顿
+    scanViewRows: [],
+    scanning: false,
+    scanStartedAt: 0,
   };
 
   // ------------------------------------------------------------ 工具
@@ -249,6 +258,9 @@
     // v1.1.0：预设策略与机会雷达的初始化（放在股票池数据就绪之后）
     initScanPresets();
     initRadarUniverse();
+    // v1.2.0：扫描档位从主进程取（含耗时预估），并让扫描源切换时同步提示
+    await initScanLimits();
+    $('#scanSource').addEventListener('change', updateScanScale);
     // 恢复上次的机会雷达结果（不必重新扫一遍就能看）
     try {
       const last = await qd.radarLast();
@@ -1208,15 +1220,73 @@
 
   function bindScan() {
     $('#btnScan').addEventListener('click', runScan);
+    $('#btnScanCancel').addEventListener('click', cancelScan);
     $('#btnExport').addEventListener('click', exportCsv);
-    $('#scanFilter').addEventListener('change', renderScan);
-    $('#scanColumns').addEventListener('change', () => {
-      state.scanColumns = $('#scanColumns').value;
+    $('#scanFilter').addEventListener('change', () => {
+      state.scanPage = 1;
       renderScan();
     });
+    $('#scanColumns').addEventListener('change', () => {
+      state.scanColumns = $('#scanColumns').value;
+      state.scanPage = 1;
+      renderScan();
+    });
+    $('#scanLimit').addEventListener('change', updateScanScale);
     // 排序表头由 bindScanSort() 绑定 —— 表头会随视图切换被重建，
     // 如果在 bindScan 里绑一次就固定住了，切回经典视图后列头会点不动。
     bindScanSort();
+  }
+
+  /**
+   * 扫描档位从主进程取，不在前端硬编码 ——
+   * 两处各写一份迟早会「前端能选 1000、后端只认 300」。
+   */
+  async function initScanLimits() {
+    try {
+      const r = await qd.scanLimits();
+      if (r && Array.isArray(r.limits) && r.limits.length) {
+        state.scanLimits = r.limits;
+        state.scanEstimates = r.estimates || {};
+        const cur = Number($('#scanLimit').value) || 100;
+        $('#scanLimit').innerHTML = r.limits
+          .map((n) => `<option value="${n}">扫描 ${n} 只</option>`)
+          .join('');
+        $('#scanLimit').value = String(r.limits.includes(cur) ? cur : (r.limits.includes(100) ? 100 : r.limits[0]));
+      }
+    } catch {
+      /* 取不到就用手写的兜底档位 */
+    }
+    updateScanScale();
+  }
+
+  /** 档位提示：预计耗时 + 数据来源说明，让用户知道点了之后要等多久。 */
+  function updateScanScale() {
+    const n = Number($('#scanLimit').value) || 100;
+    const ms = state.scanEstimates[n];
+    const src = $('#scanSource').value;
+    const srcNote =
+      src === 'market'
+        ? '分页拉取全市场成交额榜'
+        : src === 'universe' || src === 'pool'
+        ? '内置池不足时自动用全市场补齐'
+        : '使用自选清单';
+    const est = ms ? `预计 ${ms < 60000 ? Math.round(ms / 1000) + ' 秒' : (ms / 60000).toFixed(1) + ' 分钟'}` : '耗时视网络而定';
+    $('#scanScale').innerHTML =
+      `<span class="ss-item"><b>${n}</b> 只</span>` +
+      `<span class="ss-item">${esc(est)}</span>` +
+      `<span class="ss-item muted">${esc(srcNote)}</span>` +
+      (n >= 500 ? '<span class="ss-item warn">大规模扫描会持续数分钟，期间界面可正常使用，随时可取消</span>' : '');
+  }
+
+  async function cancelScan() {
+    try {
+      const r = await qd.scanCancel();
+      toast(r.message || '已请求取消');
+      $('#btnScanCancel').disabled = true;
+      $('#btnScanCancel').textContent = '正在停止…';
+    } catch (e) {
+      toast('取消失败：' + (e.message || ''));
+    }
   }
 
   /** 填充 screener.js 的股票池下拉与因子图例 */
@@ -1248,31 +1318,82 @@
 
   async function runScan() {
     const btn = $('#btnScan');
+    const cancelBtn = $('#btnScanCancel');
+    if (state.scanning) return toast('扫描正在进行中');
+    state.scanning = true;
+    state.scanStartedAt = Date.now();
     btn.disabled = true;
+    cancelBtn.style.display = '';
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = '取消扫描';
     setStatus(true, '扫描中…');
+
+    const limit = Number($('#scanLimit').value);
+    const estMs = state.scanEstimates[limit];
+    $('#scanBar').style.width = '0%';
+    $('#scanText').textContent = estMs
+      ? `准备中… 预计 ${estMs < 60000 ? Math.round(estMs / 1000) + ' 秒' : (estMs / 60000).toFixed(1) + ' 分钟'}`
+      : '准备中…';
+
     const off = qd.onScanProgress((p) => {
-      $('#scanBar').style.width = Math.round((p.done / p.total) * 100) + '%';
-      $('#scanText').textContent = `${p.done}/${p.total} · ${p.current || ''}`;
+      const pctv = p.total ? Math.round((p.done / p.total) * 100) : 0;
+      if (p.total) $('#scanBar').style.width = pctv + '%';
+      const bits = [];
+      // 拉取排行 / 补齐候选池这两个阶段没有 done/total 的百分比含义，单独显示
+      if (p.stage && p.stage !== '抓取行情与计算因子') bits.push(p.stage);
+      if (p.done) bits.push(`${p.done}/${p.total || '?'}`);
+      // 剩余时间：用「已耗时 / 已完成」线性外推。不准是正常的（前段有缓存命中会更快），
+      // 但比只显示一个进度条更能让人判断「要不要继续等」。
+      if (p.done && p.elapsed) {
+        const eta = (p.elapsed / p.done) * ((p.total || p.done) - p.done);
+        if (eta > 1000) bits.push(`剩余约 ${eta < 60000 ? Math.round(eta / 1000) + ' 秒' : (eta / 60000).toFixed(1) + ' 分钟'}`);
+      }
+      if (p.current) bits.push(p.current);
+      $('#scanText').textContent = bits.join(' · ');
     });
+
     try {
       const res = await qd.scan({
         source: $('#scanSource').value,
-        limit: Number($('#scanLimit').value),
+        limit,
         universe: $('#scanUniverse').value,
       });
       if (res.error) return toast(res.error);
       state.scanResults = res.results || [];
-      $('#scanMeta').textContent = `共 ${state.scanResults.length} 只 · 耗时 ${(res.costMs / 1000).toFixed(
-        1
-      )}s · ${new Date(res.scannedAt).toLocaleString('zh-CN')}`;
+      state.scanPage = 1;
+      const pm = res.poolMeta || {};
+      const parts = [
+        `共 ${state.scanResults.length} 只`,
+        `耗时 ${(res.costMs / 1000).toFixed(1)}s`,
+        new Date(res.scannedAt).toLocaleString('zh-CN'),
+      ];
+      if (pm.expanded) parts.push(`其中 ${pm.expanded} 只来自全市场补齐`);
+      if (pm.cancelled) parts.push('已取消（保留已完成部分）');
+      if (res.failed) parts.push(`${res.failed} 只取数失败`);
+      if (res.truncated) parts.push('大结果集：已裁剪非必要字段');
+      $('#scanMeta').textContent = parts.join(' · ');
+
+      const notes = [];
+      if (pm.fallback) notes.push(pm.fallback);
+      if (pm.shortfall > 0) {
+        notes.push(
+          `目标 ${pm.requested} 只，实际只凑到 ${pm.scanned} 只` +
+            (pm.exhausted ? '（数据源已翻到底，市场上符合条件的标的就这么多）' : '（可能受价格/成交额门槛过滤）')
+        );
+      }
+      if (notes.length) toast(notes.join('；'));
+      else toast(`扫描完成，命中 ${state.scanResults.length} 只`);
+
       renderScan();
-      toast(`扫描完成，命中 ${state.scanResults.length} 只`);
     } catch (e) {
       toast('扫描失败：' + (e.message || '请稍后重试'));
     } finally {
       off();
+      state.scanning = false;
       btn.disabled = false;
+      cancelBtn.style.display = 'none';
       setStatus(false, '就绪');
+      $('#scanBar').style.width = '100%';
     }
   }
 
@@ -1324,6 +1445,14 @@
     }
     state.scanViewRows = rows;
 
+    // ---- v1.2.0：分页。1000 只全部塞进 DOM 会让滚动与列排序明显卡顿，
+    //      所以只渲染当前页，排序/筛选仍然作用于全量结果（用 state.scanViewRows）。
+    const totalPages = Math.max(1, Math.ceil(rows.length / state.scanPageSize));
+    if (state.scanPage > totalPages) state.scanPage = totalPages;
+    if (state.scanPage < 1) state.scanPage = 1;
+    const offset = (state.scanPage - 1) * state.scanPageSize;
+    const pageRows = rows.slice(offset, offset + state.scanPageSize);
+
     // 筛选摘要（让用户始终知道「现在看到的这一屏是怎么筛出来的」）
     const sumBox = $('#screenSummary');
     if (screenRes) {
@@ -1362,12 +1491,13 @@
 
     const tb = $('#scanTable tbody');
     $('#scanEmpty').style.display = rows.length ? 'none' : 'block';
-    tb.innerHTML = rows
+    tb.innerHTML = pageRows
       .map((r, i) => {
         const f = r.factor || null;
+        const idx = offset + i + 1;
         if (factorView) {
           return `<tr>
-            <td class="muted">${i + 1}</td>
+            <td class="muted">${idx}</td>
             <td><span class="code" data-open="${esc(r.secid)}" data-code="${esc(r.code)}">${esc(r.code)}</span> <span class="name">${esc(r.name || '')}</span></td>
             <td><b>${f ? f.composite : '--'}</b></td>
             ${FACTOR_COLS.slice(1)
@@ -1380,7 +1510,7 @@
         const rt = factors.rating(r.score);
         const color = r.score >= 66 ? 'var(--up)' : r.score >= 52 ? 'var(--orange)' : 'var(--gray)';
         return `<tr>
-          <td class="muted">${i + 1}</td>
+          <td class="muted">${idx}</td>
           <td><span class="code" data-open="${esc(r.secid)}" data-code="${esc(r.code)}">${esc(
           r.code
         )}</span> <span class="name">${esc(r.name || '')}</span>${
@@ -1404,6 +1534,8 @@
       })
       .join('');
 
+    renderScanPager(rows.length, totalPages, offset);
+
     tb.querySelectorAll('[data-open]').forEach((b) =>
       b.addEventListener('click', () => openAnalyze(b.dataset.open, b.dataset.code))
     );
@@ -1411,6 +1543,48 @@
       b.addEventListener('click', () => {
         const [secid, code, name] = b.dataset.add.split('|');
         addWatch({ secid, code, name, market: Number(secid.split('.')[0]) });
+      })
+    );
+  }
+
+  /** 分页控件：上一页/下一页 + 页码跳转 + 「显示全部」逃生口 */
+  function renderScanPager(total, totalPages, offset) {
+    const box = $('#scanPager');
+    if (total <= state.scanPageSize) {
+      box.style.display = total > 0 ? 'flex' : 'none';
+      box.innerHTML =
+        total > 0
+          ? `<span class="pg-info">共 ${total} 只 · 单页显示（每页 ${state.scanPageSize} 只）</span>`
+          : '';
+      return;
+    }
+    box.style.display = 'flex';
+    // 页码按钮：当前页附近 ±2 页，避免 1000 只时出现几十个按钮
+    const nums = [];
+    const from = Math.max(1, state.scanPage - 2);
+    const to = Math.min(totalPages, state.scanPage + 2);
+    for (let i = from; i <= to; i++) nums.push(i);
+    box.innerHTML =
+      `<span class="pg-info">共 ${total} 只 · 第 ${state.scanPage}/${totalPages} 页（显示 ${offset + 1}–${Math.min(
+        offset + state.scanPageSize,
+        total
+      )}）</span>` +
+      `<span class="spacer"></span>` +
+      `<button class="btn sm" data-page="1" ${state.scanPage === 1 ? 'disabled' : ''}>首页</button>` +
+      `<button class="btn sm" data-page="${state.scanPage - 1}" ${state.scanPage === 1 ? 'disabled' : ''}>上一页</button>` +
+      nums.map((n) => `<button class="btn sm ${n === state.scanPage ? 'primary' : ''}" data-page="${n}">${n}</button>`).join('') +
+      `<button class="btn sm" data-page="${state.scanPage + 1}" ${state.scanPage === totalPages ? 'disabled' : ''}>下一页</button>` +
+      `<button class="btn sm" data-page="${totalPages}" ${state.scanPage === totalPages ? 'disabled' : ''}>末页</button>`;
+
+    box.querySelectorAll('[data-page]').forEach((b) =>
+      b.addEventListener('click', () => {
+        const n = Number(b.dataset.page);
+        if (!Number.isFinite(n) || n < 1 || n > totalPages || n === state.scanPage) return;
+        state.scanPage = n;
+        renderScan();
+        // 翻页后把表格顶部带回可视区，否则会停在页面中间让人以为没反应
+        const sc = document.querySelector('#scanTable').closest('.table-scroll');
+        if (sc) sc.scrollTop = 0;
       })
     );
   }

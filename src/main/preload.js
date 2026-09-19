@@ -47,6 +47,9 @@ const api = {
   // 扫描
   scan: (opt) => ipcRenderer.invoke('scan:run', opt),
   lastScan: () => ipcRenderer.invoke('scan:last'),
+  // v1.2.0：档位（含耗时预估）与取消
+  scanLimits: () => ipcRenderer.invoke('scan:limits'),
+  scanCancel: () => ipcRenderer.invoke('scan:cancel'),
   onScanProgress: (cb) => {
     const h = (_, p) => cb(p);
     ipcRenderer.on('scan:progress', h);

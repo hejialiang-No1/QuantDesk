@@ -398,6 +398,25 @@ function createWindow() {
                     return -999;
                   }
                 })(),
+                // ---- v1.2.0 大批量扫描界面
+                scanLimitOptions: n('#scanLimit option'),
+                scanCancelBtn: !!q('#btnScanCancel'),
+                scanScaleBar: ((q('#scanScale') || {}).textContent || '').trim().length > 0,
+                scanPagerExists: !!q('#scanPager'),
+                // 档位必须来自主进程（单一数据源）。前端硬编码一份的话，
+                // 迟早出现「能选 1000、后端只认 300」这种对不上的问题，
+                // 所以这里直接比对两边的集合是否一致。
+                scanLimitMatches: (function () {
+                  try {
+                    const opts = Array.prototype.slice
+                      .call(document.querySelectorAll('#scanLimit option'))
+                      .map((o) => Number(o.value))
+                      .filter((n) => n > 0);
+                    return opts.length ? opts.join(',') : '';
+                  } catch (e) {
+                    return '';
+                  }
+                })(),
               },
               // 渲染层内的“一次性往返”验证：用临时账户跑一遍撮合，不碰真实模拟盘、不联网。
               // 目的是证明模块在渲染层真的可用，而不是只挂了个空壳。
@@ -544,6 +563,13 @@ function createWindow() {
             ['事件日历模块可产出事件', e2.radarEvents > 0],
             ['风险机会引擎可产出结论', e2.insightItems > 0],
             ['暴涨雷达给出等级与失效条件', e2.moonshotRows > 0 && e2.moonshotInvalidation > 0],
+            // ---- v1.2.0 大批量扫描
+            ['扫描档位共 7 档', e2.scanLimitOptions === 7],
+            ['档位数值与主进程定义一致', e2.scanLimitMatches === SCAN_LIMITS.join(',')],
+            ['最大档位为 1000', e2.scanLimitMatches.split(',').map(Number).includes(1000)],
+            ['取消扫描按钮存在', e2.scanCancelBtn === true],
+            ['扫描规模提示条已渲染', e2.scanScaleBar === true],
+            ['结果分页容器存在', e2.scanPagerExists === true],
             ['模拟盘撮合往返：受理', rt.orderOk === true && rt.status === 'submitted'],
             ['模拟盘撮合往返：成交落账', rt.fills === 1 && rt.positions === 1 && rt.cashBelow === true && rt.feePositive === true],
             ['模拟盘上线就绪度清单 7 项且结论明确', rt.readyTotal === 7 && rt.readyItems === 7 && /\d\/7/.test(String(rt.ready)) && rt.readyVerdict.length > 4],
@@ -727,17 +753,119 @@ function buildMenu() {
 // ---------------------------------------------------------------- 扫描
 
 let scanRunning = false;
+/** v1.2.0：取消标志。worker 每处理完一只都会检查，做到「秒级响应」而不是等整批跑完。 */
+let scanCancelRequested = false;
+
+/** 统一的扫描进度推送（带上已耗时，界面要据此估算剩余时间） */
+function sendScanProgress(p) {
+  if (mainWindow && mainWindow.webContents) {
+    try {
+      mainWindow.webContents.send('scan:progress', p);
+    } catch {
+      /* 窗口已关闭时忽略 */
+    }
+  }
+}
+
+/**
+ * 支持的扫描档位（单一数据源）。
+ * 前端下拉从这里的 IPC 取，**不要在两处各硬编码一份** ——
+ * 那样迟早出现「前端能选 1000、后端只认 300」这类对不上的问题。
+ */
+const SCAN_LIMITS = [50, 100, 150, 200, 300, 500, 1000];
+
+/**
+ * 按档位给出耗时预估（毫秒）。用于界面上显示「预计需要多久」，避免用户以为程序卡死。
+ *
+ * 系数由实测校准（`npm run scan-load -- 300` / `-- 1000`）：
+ *   300 只实测 15.2s（估算 19.5s）、1000 只实测 34.7s（估算 32.8s），偏差 ±30% 以内。
+ * 这个精度足够用于「要不要继续等」的判断 —— 它不需要准，需要的是量级正确。
+ */
+function estimateScanMs(limit) {
+  const th = scanThrottle(limit);
+  // 每只：1 次 K 线请求（偶发要试备用市场号，按 1.25 计）
+  // 排队间隔按并发数摊薄，再叠加平均网络往返
+  const perReq = 130;
+  const queued = (limit * 1.25 * th.minInterval) / th.concurrency;
+  return Math.round(queued + (limit * 1.25 * perReq) / th.concurrency);
+}
+
+/** 扫描规模 → 并发与限流参数。规模越大越激进，但留出足够余量避免被数据源掐断。 */
+function scanThrottle(limit) {
+  if (limit <= 150) return { concurrency: 3, minInterval: 180 };
+  if (limit <= 300) return { concurrency: 5, minInterval: 130 };
+  if (limit <= 600) return { concurrency: 6, minInterval: 100 };
+  return { concurrency: 8, minInterval: 80 };
+}
+
+/** 结果裁剪：1000 只全量回传会有几 MB，IPC 序列化与渲染都会卡。只保留界面真正要用的字段。 */
+function trimScanResult(r, deep) {
+  if (deep) return r;
+  return {
+    secid: r.secid,
+    code: r.code,
+    name: r.name,
+    group: r.group,
+    price: r.price,
+    changePct: r.changePct,
+    score: r.score,
+    factors: r.factors,
+    bullCount: r.bullCount,
+    bearCount: r.bearCount,
+    signals: (r.signals || []).slice(0, 3),
+    metrics: {
+      rsi: r.metrics.rsi,
+      ret20: r.metrics.ret20,
+      ret60: r.metrics.ret60,
+      volRatio: r.metrics.volRatio,
+      distHigh: r.metrics.distHigh,
+      atrPct: r.metrics.atrPct,
+      volatility: r.metrics.volatility,
+    },
+    factor: r.factor
+      ? { symbol: r.factor.symbol, composite: r.factor.composite, scores: r.factor.scores, pe: r.factor.pe, marketCap: r.factor.marketCap, raw: { avgAmount: (r.factor.raw || {}).avgAmount } }
+      : null,
+    pe: r.pe,
+    marketCap: r.marketCap,
+    amount: r.amount,
+  };
+}
 
 async function runScan(options = {}) {
   if (scanRunning) return { error: '扫描任务正在运行中' };
   scanRunning = true;
+  scanCancelRequested = false;
   const t0 = Date.now();
   let payloadBenchmark = null;
+  const restoreThrottle = ds.setThrottle ? ds.setThrottle({ concurrency: 3, minInterval: 180 }) : null;
   try {
     const { source = 'pool', limit = 80, minPrice = 3, minAmount = 0, universe = '' } = options;
+    // v1.2.0：上限放宽到 1000。夹紧到 [10, 1200] —— 前端算错或手改 IPC 参数时
+    // 不至于把 3000 只的请求打到数据源上（那必然被封）。
+    const LIMIT = Math.max(10, Math.min(1200, Number(limit) || 80));
+    const expandPool = options.expandPool !== false;
 
     // 1) 候选池
     let candidates = [];
+    const poolMeta = { source, requested: LIMIT, builtin: 0, expanded: 0, exhausted: false, pages: 0 };
+    const pushUniq = (seen) => (row, group) => {
+      const code = String(row.code || '').toUpperCase();
+      if (!code || seen.has(code)) return false;
+      if ((row.price || 0) < minPrice) return false;
+      if (minAmount > 0 && (row.amount || 0) < minAmount) return false;
+      seen.add(code);
+      candidates.push({
+        secid: row.secid || `105.${code}`,
+        altSecid: row.altSecid || `106.${code}`,
+        code,
+        name: row.name || '',
+        group: group || '',
+        // 来自排行的行自带市值/PE，直接给因子层用，省掉一批实时行情请求
+        _rank: row.marketCap || row.pe ? row : null,
+      });
+      return true;
+    };
+
     if (source === 'universe' && universe) {
       // 来自 screener.js 的内置股票池。这里只拿到代码，没有 secid：
       // 美股在东财体系里就是「市场号.代码」，105=NASDAQ / 106=NYSE，
@@ -745,43 +873,105 @@ async function runScan(options = {}) {
       const us = Screener.universes(store.get('watchlist').map((w) => w.code));
       const u = us[universe];
       if (!u) return { error: `未知股票池：${universe}` };
-      candidates = u.codes.map((code) => ({
-        secid: `105.${code}`,
-        altSecid: `106.${code}`,
-        code,
-        name: '',
-        group: u.label,
-      }));
+      const seen = new Set();
+      const add = pushUniq(seen);
+      for (const code of u.codes) add({ secid: `105.${code}`, code, name: '' }, u.label);
+      poolMeta.builtin = candidates.length;
+      // 内置池不够时用全市场补齐 —— 否则用户选了「扫描 1000 只」，
+      // 实际只扫 70 只却没有任何提示，会误以为「已经扫完全市场」。
+      if (expandPool && candidates.length < LIMIT) {
+        try {
+          const need = Math.min(1200, LIMIT + 40); // 多拉一点，过滤低价股后仍有富余
+          const r = await ds.rankAll({
+            total: need,
+            onProgress: (p) => sendScanProgress({ stage: '补充候选池', done: p.fetched, total: need, current: '第 ' + p.page + ' 页' }),
+          });
+          poolMeta.pages = r.pages;
+          poolMeta.exhausted = r.exhausted;
+          for (const row of r.rows) {
+            if (candidates.length >= LIMIT) break;
+            add(row, '全市场补齐');
+          }
+        } catch {
+          /* 补齐失败就用手上的内置池，不阻塞 */
+        }
+      }
+      poolMeta.expanded = candidates.length - poolMeta.builtin;
     } else if (source === 'watch') {
-      candidates = store.get('watchlist').map((w) => ({ ...w }));
+      const seen = new Set();
+      const add = pushUniq(seen);
+      for (const w of store.get('watchlist')) add(w, '自选');
     } else if (source === 'market') {
-      // 全市场：按成交额取头部，再过滤低价股
+      // 全市场：按成交额取头部。v1.2.0 起用 rankAll 分页拉取，
+      // 实测东财每页最多 100 条，所以 1000 只要翻 10 页。
       try {
-        const rows = await ds.rank({ size: Math.min(600, Math.max(limit * 6, 200)) });
-        candidates = rows
-          .filter((r) => (r.price || 0) >= minPrice && (r.amount || 0) >= minAmount)
-          .slice(0, limit * 2)
-          .map((r) => ({ secid: r.secid, code: r.code, name: r.name }));
+        const need = Math.min(1200, LIMIT + Math.max(40, Math.round(LIMIT * 0.3)));
+        const r = await ds.rankAll({
+          total: need,
+          onProgress: (p) => sendScanProgress({ stage: '拉取全市场排行', done: p.fetched, total: need, current: '第 ' + p.page + ' 页' }),
+        });
+        poolMeta.pages = r.pages;
+        poolMeta.exhausted = r.exhausted;
+        const seen = new Set();
+        const add = pushUniq(seen);
+        for (const row of r.rows) {
+          if (candidates.length >= LIMIT) break;
+          add(row, '全市场');
+        }
       } catch (e) {
         // 排行接口不稳时回退到内置池
-        candidates = POOL.slice(0, limit * 2);
+        const seen = new Set();
+        const add = pushUniq(seen);
+        for (const p of POOL) {
+          if (candidates.length >= LIMIT) break;
+          add({ secid: p.secid, code: p.code, name: p.name }, p.group || '内置池');
+        }
+        poolMeta.fallback = '排行接口不可用，已回退到内置精选池：' + e.message;
       }
     } else {
-      candidates = POOL.slice(0, Math.max(limit * 2, 60));
+      const seen = new Set();
+      const add = pushUniq(seen);
+      for (const p of POOL) {
+        if (candidates.length >= LIMIT) break;
+        add({ secid: p.secid, code: p.code, name: p.name }, p.group || '内置池');
+      }
+      poolMeta.builtin = candidates.length;
+      if (expandPool && candidates.length < LIMIT) {
+        try {
+          const r = await ds.rankAll({ total: Math.min(1200, LIMIT + 40) });
+          poolMeta.pages = r.pages;
+          poolMeta.exhausted = r.exhausted;
+          for (const row of r.rows) {
+            if (candidates.length >= LIMIT) break;
+            add(row, '全市场补齐');
+          }
+        } catch {
+          /* 忽略 */
+        }
+      }
+      poolMeta.expanded = candidates.length - poolMeta.builtin;
     }
 
     if (!candidates.length) return { error: '候选池为空' };
 
-    const total = Math.min(candidates.length, Math.max(limit, 20));
+    const total = Math.min(candidates.length, LIMIT);
     const targets = candidates.slice(0, total);
+    poolMeta.scanned = total;
+    poolMeta.shortfall = LIMIT - total; // >0 说明标的数量不够（或全被价格门槛过滤）
     const results = [];
     let done = 0;
+    let failed = 0;
 
-    // 2) 并发抓 K 线 + 因子计算（并发 3，与数据源限流策略一致）
-    const CONC = 3;
+    // 2) 抓 K 线 + 因子计算。
+    //    并发与限流按规模动态调整：1000 只仍用 3 并发 × 180ms 的话，
+    //    光排队就要 60 秒，加上网络往返得十几分钟，体验无法接受。
+    const th = scanThrottle(total);
+    if (ds.setThrottle) ds.setThrottle(th);
+    poolMeta.throttle = th;
     let cursor = 0;
     const worker = async () => {
       while (cursor < targets.length) {
+        if (scanCancelRequested) return;
         const idx = cursor++;
         const t = targets[idx];
         try {
@@ -805,40 +995,75 @@ async function runScan(options = {}) {
                 ...a,
                 // v1.1.0：保留 K 线用于算多因子分，算完就删（不要回传给渲染层，太大）
                 _bars: k.bars,
+                _rank: t._rank || null,
               });
             }
+          } else {
+            failed++;
           }
         } catch {
-          /* 单只失败跳过 */
+          failed++;
         }
         done++;
-        if (mainWindow && mainWindow.webContents && done % 3 === 0) {
-          mainWindow.webContents.send('scan:progress', {
+        if (done % 3 === 0 || done === targets.length) {
+          sendScanProgress({
+            stage: '抓取行情与计算因子',
             done,
             total: targets.length,
             current: t.code,
+            elapsed: Date.now() - t0,
           });
         }
       }
     };
-    await Promise.all(Array.from({ length: CONC }, worker));
+    await Promise.all(Array.from({ length: th.concurrency }, worker));
 
-    // 3) 补充实时行情（涨幅 / 成交额），失败不影响主结果
-    try {
-      const qt = await ds.quotes(results.map((r) => r.secid), { maxAge: 60000, concurrency: 3 });
-      const map = new Map(qt.map((q) => [q.secid, q]));
-      for (const r of results) {
-        const q = map.get(r.secid);
-        if (q) {
-          r.price = q.price;
-          r.changePct = q.changePct;
-          r.amount = q.amount;
-          r.marketCap = q.marketCap;
-          r.pe = q.pe;
-        }
+    if (scanCancelRequested) {
+      poolMeta.cancelled = true;
+    }
+
+    // 3) 补充实时行情（涨幅 / 成交额 / PE / 市值）
+    //
+    //    ★ v1.2.0 的关键优化：全市场排行榜返回的行**本身就带市值和 PE**，
+    //      直接用即可。1000 只逐一再打一次行情接口既慢又必然被限流，
+    //      原本「扫描 600 只」之所以那么慢，一半时间耗在这一步。
+    //      只有「内置池 / 自选」这类不带估值数据的候选才需要补，而且限量。
+    const needQuote = [];
+    for (const r of results) {
+      const rk = r._rank;
+      if (rk) {
+        if (rk.marketCap) r.marketCap = rk.marketCap;
+        if (rk.floatCap) r.floatCap = rk.floatCap;
+        if (rk.pe) r.pe = rk.pe;
+        if (rk.amount) r.amount = rk.amount;
+        if (rk.changePct != null && r.changePct == null) r.changePct = rk.changePct;
       }
-    } catch {
-      /* 行情补充失败忽略 */
+      if (r.marketCap == null || r.pe == null) needQuote.push(r.secid);
+    }
+    // 规模越大补得越少：超过 300 只时干脆不补（因子层会用「缺失」分支处理，不编造数据）
+    const QUOTE_CAP = total > 300 ? 0 : total > 150 ? 120 : 400;
+    const quoteTargets = needQuote.slice(0, QUOTE_CAP);
+    poolMeta.quoteNeeded = needQuote.length;
+    poolMeta.quoteFilled = quoteTargets.length;
+    poolMeta.quoteSkipped = needQuote.length - quoteTargets.length;
+    if (quoteTargets.length) {
+      try {
+        const qt = await ds.quotes(quoteTargets, { maxAge: 60000, concurrency: th.concurrency });
+        const map = new Map(qt.map((q) => [q.secid, q]));
+        for (const r of results) {
+          const q = map.get(r.secid);
+          if (!q) continue;
+          if (q.price) r.price = q.price;
+          if (q.changePct != null) r.changePct = q.changePct;
+          if (q.amount) r.amount = q.amount;
+          if (q.marketCap) r.marketCap = q.marketCap;
+          if (q.pe) r.pe = q.pe;
+          if (q.floatCap) r.floatCap = q.floatCap;
+          if (q.pb) r.pb = q.pb;
+        }
+      } catch {
+        /* 行情补充失败忽略 */
+      }
     }
 
     // 3.5) v1.1.0：多因子得分
@@ -882,14 +1107,24 @@ async function runScan(options = {}) {
     } catch {
       /* 因子层整体失败时，界面上的预设策略会提示「缺因子数据」，不影响原有评分 */
     }
-    for (const r of results) delete r._bars;
+    for (const r of results) {
+      delete r._bars;
+      delete r._rank; // 诊断用的原始行，不回传给渲染层
+    }
 
     results.sort((a, b) => b.score - a.score);
+    // 规模大时裁剪字段：1000 只全量（含完整 metrics + signals + factor.raw）回传有几 MB，
+    // IPC 序列化与表格渲染都会明显卡顿。界面真正用到的字段在 trimScanResult 里列全了。
+    const deep = total <= 300;
     const payload = {
-      results,
+      results: results.map((r) => trimScanResult(r, deep)),
       scannedAt: Date.now(),
       costMs: Date.now() - t0,
       source,
+      limit: LIMIT,
+      poolMeta,
+      failed,
+      truncated: !deep,
       benchmark: payloadBenchmark,
       hasFactors: results.some((r) => !!r.factor),
     };
@@ -898,6 +1133,10 @@ async function runScan(options = {}) {
     return payload;
   } finally {
     scanRunning = false;
+    scanCancelRequested = false;
+    // 恢复默认限流 —— 不恢复的话，一次 1000 只的扫描会把全局参数
+    // 永久留在高并发档，之后所有请求都贴着限流边缘跑
+    if (restoreThrottle) restoreThrottle();
   }
 }
 
@@ -1677,6 +1916,20 @@ function registerIpc() {
 
   ipcMain.handle('scan:run', (_, opt) => runScan(opt || {}));
   ipcMain.handle('scan:last', () => store.get('scanResults'));
+  // v1.2.0：扫描档位与取消
+  ipcMain.handle('scan:limits', () => ({
+    limits: SCAN_LIMITS,
+    estimates: SCAN_LIMITS.reduce((acc, n) => {
+      acc[n] = estimateScanMs(n);
+      return acc;
+    }, {}),
+    running: scanRunning,
+  }));
+  ipcMain.handle('scan:cancel', () => {
+    if (!scanRunning) return { ok: false, message: '当前没有正在运行的扫描' };
+    scanCancelRequested = true;
+    return { ok: true, message: '已请求取消，正在停止（不会等待当前批次跑完）' };
+  });
 
   // ---- v1.1.0：机会雷达 / 新闻 / 事件日历
   ipcMain.handle('radar:run', (_, opt) => runRadar(opt || {}));

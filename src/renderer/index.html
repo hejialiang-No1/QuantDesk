@@ -342,18 +342,25 @@
               <option value="market">全市场成交额榜</option>
               <option value="watch">我的自选</option>
             </select>
-            <select class="input" id="scanLimit" style="width:112px">
-              <option value="40">扫描 40 只</option>
-              <option value="80" selected>扫描 80 只</option>
+            <select class="input" id="scanLimit" style="width:140px">
+              <option value="50">扫描 50 只</option>
+              <option value="100" selected>扫描 100 只</option>
               <option value="150">扫描 150 只</option>
+              <option value="200">扫描 200 只</option>
+              <option value="300">扫描 300 只</option>
+              <option value="500">扫描 500 只</option>
+              <option value="1000">扫描 1000 只</option>
             </select>
             <button class="btn primary" id="btnScan">开始扫描</button>
+            <button class="btn danger" id="btnScanCancel" style="display:none">取消扫描</button>
           </div>
           <div class="panel-bd">
             <div class="callout info">
               <span class="callout-tag">评分口径</span>
-              <span class="callout-text">≥66 为看多区间，≤40 建议回避。扫描会并发抓取历史K线做全量计算，80 只约需 20–40 秒（受数据源限流影响）。质量与盈利修正两项<strong>是价格行为代理口径</strong>（拿不到 ROE 与分析师一致预期），已在下方因子表标注。结果仅供参考，不构成投资建议。</span>
+              <span class="callout-text">≥66 为看多区间，≤40 建议回避。质量与盈利修正两项<strong>是价格行为代理口径</strong>（拿不到 ROE 与分析师一致预期），已在下方因子表标注。<br/>
+              <strong>扫描规模</strong>：50–150 只并发 3（约十几秒）；300 只并发 5；500–1000 只并发 8，先分页拉取全市场成交额榜再逐只取 K 线。<strong>1000 只实测约 40 秒</strong>（本机压测，成功率 99.4%）。扫描中可随时取消，已算出的部分结果会保留。</span>
             </div>
+            <div class="scan-scale" id="scanScale"></div>
             <div class="factor-legend" id="scanFactorLegend"></div>
             <!-- v1.1.0：预设策略（把「选什么」这件事从一堆散装因子变成可解释的交易假设） -->
             <div class="preset-bar">
@@ -409,6 +416,8 @@
                 <tbody></tbody>
               </table>
             </div>
+            <!-- v1.2.0：结果分页。1000 只全渲染会让滚动与排序明显卡顿，所以分页显示 -->
+            <div class="pager" id="scanPager" style="display:none"></div>
             <div class="empty" id="scanEmpty">还没有扫描结果，点击「开始扫描」</div>
           </div>
         </div>

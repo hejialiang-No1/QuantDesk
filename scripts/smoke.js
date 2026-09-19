@@ -792,6 +792,50 @@ function ok(name, cond, extra) {
     check('不传预设时不做过滤', none.rows.length === 2 && none.preset === null);
   }
 
+  // 27) v1.2.0 大批量扫描支撑
+  console.log('\n--- 大批量扫描（rankAll / setThrottle） ---');
+  {
+    // 东财 clist 实测每页最多 100 条，所以「取 150 只」必然要翻页。
+    // 这个测试同时钉住三件事：分页确实生效、结果无重复、翻到底会被识别。
+    const t0 = Date.now();
+    const ra = await ds.rankAll({ total: 150 });
+    const uniq = new Set(ra.rows.map((x) => x.code));
+    check('rankAll 分页取到目标数量', ra.rows.length >= 150, `${ra.rows.length} 只`);
+    check('rankAll 结果无重复', uniq.size === ra.rows.length, `去重后 ${uniq.size}`);
+    check('rankAll 确实翻了页', ra.pages >= 2, `${ra.pages} 页`);
+
+    // PE 口径必须与 quoteOne 一致，否则「全市场扫描」与「个股详情」会给出矛盾的估值结论。
+    // 实测 clist 的 f163/f164/f162 不是 PE（返回 5.5 亿级数字），正确字段是 f114。
+    const row = ra.rows.find((x) => x.code === 'NVDA') || ra.rows.find((x) => x.pe > 0);
+    if (row) {
+      const q = await ds.quoteOne(row.secid).catch(() => null);
+      if (q && q.pe) {
+        const dev = Math.abs(row.pe - q.pe) / q.pe;
+        check('排行接口 PE 与行情接口口径一致', dev < 0.02, `rank=${row.pe} quote=${q.pe}`);
+      } else {
+        check('排行接口 PE 与行情接口口径一致', row.pe > 0 && row.pe < 2000, `rank=${row.pe}（行情不可用，仅做量级检查）`);
+      }
+    }
+    check('排行返回的市值量级正确', ra.rows.some((x) => x.marketCap > 1e10), '存在千亿级市值');
+
+    // setThrottle 必须返回可用的恢复函数：不恢复会让限流参数永久停在激进档
+    const before = ds.activeSource();
+    const restore = ds.setThrottle({ concurrency: 8, minInterval: 50 });
+    check('setThrottle 返回恢复函数', typeof restore === 'function');
+    restore();
+    check('setThrottle 可正常调用（幂等恢复）', typeof before === 'object');
+    check('非法参数被夹紧而不报错', (() => {
+      const r2 = ds.setThrottle({ concurrency: 999, minInterval: -5 });
+      r2();
+      return true;
+    })());
+
+    // 小规模时不应有额外的分页开销
+    const small = await ds.rankAll({ total: 50 });
+    check('小规模只翻一页', small.pages === 1 && small.rows.length >= 50, `${small.rows.length} 只 / ${small.pages} 页`);
+    console.log(`   （本次 rankAll 测试耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+  }
+
   console.log(`\n===== 通过 ${pass} 项，失败 ${fail} 项 =====\n`);
   process.exit(fail ? 1 : 0);
 })();

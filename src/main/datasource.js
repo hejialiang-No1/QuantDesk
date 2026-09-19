@@ -150,6 +150,23 @@ class RequestQueue {
 
 const queue = new RequestQueue({ concurrency: 3, minInterval: 180 });
 
+/**
+ * 动态调整全局请求限流（v1.2.0，供大批量扫描使用）。
+ *
+ * 为什么需要：1000 只 K 线若仍按「3 并发 + 180ms 间隔」排队，光排队就要 60 秒，
+ * 加上网络往返得十几分钟，体验无法接受。规模大时必须适当放宽。
+ *
+ * ★ 返回恢复函数，调用方要在 finally 里调用它 ——
+ *   否则一次激进扫描会把限流参数永久留在高并发档，之后所有请求都贴着限流边缘跑。
+ */
+function setThrottle(opt) {
+  const prev = { concurrency: queue.concurrency, minInterval: queue.minInterval };
+  const o = opt || {};
+  if (o.concurrency) queue.concurrency = Math.max(1, Math.min(16, Number(o.concurrency)));
+  if (o.minInterval != null) queue.minInterval = Math.max(0, Math.min(1000, Number(o.minInterval)));
+  return () => setThrottle(prev);
+}
+
 async function httpGet(url, { timeout = 15000, retries = 1, headers } = {}) {
   let lastErr;
   for (let i = 0; i <= retries; i++) {
@@ -356,12 +373,16 @@ async function emSearch(kw, limit) {
     .slice(0, limit);
 }
 
-async function emRank({ markets = [105, 106, 107], size = 200, page = 1, sortField = 'f6' }) {
+async function emRank({ markets = [105, 106, 107], size = 200, page = 1, sortField = 'f6', raw = false }) {
   const fsq = markets.map((m) => `m:${m}`).join(',');
+  // ★ 注意：clist 接口与 stock/get 接口的**同名字段含义不一致**。
+  //   stock/get 里 f163 是「市盈率×100」，而 clist 的 f163 是别的量（实测返回 5.5 亿级数字）。
+  //   所以这里单独列出候选 PE 字段（f9/f115/f23），不要照搬 emParse 的取法。
   const buf = await httpGetHosts(
     EM_HOSTS,
     `/api/qt/clist/get?pn=${page}&pz=${size}&po=1&np=1&fltt=2&invt=2&fid=${sortField}` +
-      `&fs=${encodeURIComponent(fsq)}&fields=f12,f13,f14,f2,f3,f4,f5,f6,f20,f21,f116,f162,f163,f164`
+      `&fs=${encodeURIComponent(fsq)}&fields=f12,f13,f14,f2,f3,f4,f5,f6,f20,f21,f116,f117,` +
+      `f9,f23,f114,f115,f162,f163,f164,f167,f168`
   );
   const j = JSON.parse(new TextDecoder('utf-8').decode(buf));
   const rows = j?.data?.diff;
@@ -369,8 +390,13 @@ async function emRank({ markets = [105, 106, 107], size = 200, page = 1, sortFie
   return rows.map((r) => ({
     secid: `${num(r.f13) || 105}.${r.f12}`, code: r.f12, market: num(r.f13) || 105,
     name: r.f14, price: num(r.f2), changePct: num(r.f3), change: num(r.f4),
-    volume: num(r.f5), amount: num(r.f6), marketCap: num(r.f20),
-    pe: pickFloat(r.f163, r.f164, r.f162),
+    volume: num(r.f5), amount: num(r.f6), marketCap: num(r.f20), floatCap: num(r.f21),
+    // PE 口径必须与 quoteOne 一致，否则「全市场扫描」与「个股详情」会给出不同的估值结论。
+    // 实测对照（NVDA/MU/AAPL/MSFT/TSLA）：f114 与 stock/get 的 PE(TTM) 逐只完全一致；
+    // f9 / f115 是另一个口径（动态 PE），偏差可达 3 倍（MU: 22.73 vs 134.35），
+    // 用错会让「价值」因子在全市场扫描里给出与详情页相反的结论。
+    pe: pickFloat(r.f114, r.f9, r.f115),
+    _raw: raw ? r : undefined,
   })).filter((r) => r.code && r.price !== null);
 }
 
@@ -864,6 +890,88 @@ async function rank(opts) {
   }
 }
 
+/**
+ * 分页拉取全市场排行（用于大批量扫描）。
+ *
+ * 实测：东财 clist 的 `pz` 参数**每页最多只返回 100 条**（传 200 也只给 100），
+ * 所以想拿 1000 只就必须翻 10 页。这里把翻页、去重、限流、进度回调一次性封装好，
+ * 避免上层各写一遍（写多遍必然出现某处忘了去重或忘了限流）。
+ *
+ * @param {Object} opt {
+ *   total,       目标条数（会向上取整到整页）
+ *   markets,     市场号数组，默认三个美股市场
+ *   sortField,   排序字段，默认 f6（成交额）
+ *   pageSize,    每页条数，上限 100
+ *   onProgress,  (info) => void，info = { fetched, total, page }
+ *   maxPages,    安全上限，防止接口异常时无限翻页
+ * }
+ * @returns {{ rows: Array, pages: number, exhausted: boolean }}
+ *   pages       = **实际请求的页数**（不是下一页的页码）
+ *   exhausted   = true 表示已翻到没有更多数据（市场实际标的少于请求量）
+ *   rows 的条数是整页的倍数，可能略多于 total —— 调用方若需要精确数量自行截断，
+ *   多出来的部分正好用来抵消低价股过滤的损耗。
+ */
+async function rankAll(opt) {
+  const o = opt || {};
+  const total = Math.max(1, Number(o.total) || 100);
+  const pageSize = Math.min(100, Math.max(20, Number(o.pageSize) || 100));
+  const maxPages = Math.max(1, Number(o.maxPages) || 30);
+  const markets = o.markets || [MARKET.NASDAQ, MARKET.NYSE, MARKET.AMEX];
+  const sortField = o.sortField || 'f6';
+  const pagesNeeded = Math.ceil(total / pageSize);
+
+  const seen = new Set();
+  const rows = [];
+  let page = 1;
+  let pagesFetched = 0;
+  let exhausted = false;
+
+  while (page <= Math.min(pagesNeeded, maxPages)) {
+    // 走缓存：同一页在 10 分钟内重复拉取没有意义，而翻 10 页的耗时是实打实的
+    const ck = `rank:${sortField}:${markets.join('_')}:${page}:${pageSize}`;
+    let batch = cache.get(ck, 10 * 60 * 1000);
+    if (!batch) {
+      try {
+        batch = await rank({ markets, size: pageSize, page, sortField });
+        cache.set(ck, batch);
+      } catch (e) {
+        // 单页失败不整体失败：前面的页仍然有效，只是数量少一些。
+        // 这一点很重要 —— 翻到第 7 页被限流就丢掉前 6 页 600 只，是明显的浪费。
+        if (rows.length === 0) throw e;
+        break;
+      }
+    }
+    pagesFetched++;
+    if (!batch.length) {
+      exhausted = true;
+      break;
+    }
+    let added = 0;
+    for (const r of batch) {
+      const k = r.secid || r.code;
+      if (!k || seen.has(k)) continue;
+      seen.add(k);
+      rows.push(r);
+      added++;
+    }
+    if (o.onProgress) {
+      try {
+        o.onProgress({ fetched: rows.length, total, page: pagesFetched });
+      } catch {
+        /* 进度回调不应该影响主流程 */
+      }
+    }
+    // 整页都是重复 → 说明已经翻到底了（接口在重复返回最后一批）
+    if (added === 0 || batch.length < pageSize) {
+      exhausted = true;
+      break;
+    }
+    page++;
+  }
+
+  return { rows, pages: pagesFetched, exhausted };
+}
+
 const INDEXES = [
   { secid: '100.NDX', code: 'NDX', name: '纳斯达克100' },
   { secid: '100.DJIA', code: 'DJIA', name: '道琼斯' },
@@ -1006,6 +1114,8 @@ module.exports = {
   MARKET, MARKET_NAME, PERIOD, makeSecid, initCache, activeSource,
   clearCache: () => cache.clear(),
   search, quoteOne, quotes, kline, rank, indexQuotes, num, aggregate,
+  // v1.2.0：大批量扫描用
+  rankAll, setThrottle,
   // v1.1.0 新增数据面
   eastmoneyNews, nasdaqEarnings, nasdaqDividends, nasdaqSplits,
   nasdaqShortInterest, nasdaqTargetPrice, nasdaqKline,
