@@ -1,8 +1,8 @@
 {
   "name": "quantdesk",
   "productName": "QuantDesk",
-  "version": "1.0.2",
-  "description": "QuantDesk - 美股量化终端 (US Equity Quant Terminal) v1.0.2",
+  "version": "1.1.0",
+  "description": "QuantDesk - 美股量化终端 (US Equity Quant Terminal) v1.1.0",
   "main": "src/main/main.js",
   "author": "hejialiang",
   "license": "MIT",
@@ -12,8 +12,12 @@
     "smoke": "node scripts/smoke.js",
     "ui-smoke": "bash scripts/ui-smoke.sh",
     "shots": "bash scripts/shots.sh",
+    "radar": "node scripts/radar-cli.js",
+    "report": "node scripts/radar-report.js",
+    "verify": "node scripts/verify-quotes.js",
+    "dist": "bash scripts/build-dmg.sh",
+    "dist:builder": "electron-builder --mac --arm64 --publish never",
     "pack": "electron-builder --dir --mac --arm64",
-    "dist": "electron-builder --mac --arm64 --publish never",
     "icon": "node scripts/make-icon.js"
   },
   "devDependencies": {

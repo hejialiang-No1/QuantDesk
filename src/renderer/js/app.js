@@ -24,6 +24,11 @@
   const Broker = pick('Broker', 'broker');
   const Screener = pick('Screener', 'screener');
   const Alerts = pick('Alerts', 'alerts');
+  // ---- v1.1.0
+  const Newsfeed = pick('Newsfeed', 'newsfeed');
+  const Events = pick('Events', 'events');
+  const Insight = pick('Insight', 'insight');
+  const Moonshot = pick('Moonshot', 'moonshot');
 
   const $ = (s) => document.querySelector(s);
   const $$ = (s) => Array.from(document.querySelectorAll(s));
@@ -79,6 +84,17 @@
     taxForm: 'b1099',
     scanUniverse: 'sp500',
     brokerVenue: 'ibkr',
+
+    // ---- v1.1.0 机会雷达
+    radar: null,            // runRadar 的完整返回
+    radarUniverse: 'highbeta',
+    radarPick: null,        // 当前在看详情的标的 symbol
+    radarNewsPick: null,    // 新闻面板当前标的
+    radarSort: 'moonshot',
+    radarGrade: '',
+    preset: '',             // 选股页当前选中的预设策略
+    scanColumns: 'classic', // 经典视图 / 因子视图
+    screenResult: null,     // 最近一次预设筛选的结果
   };
 
   // ------------------------------------------------------------ 工具
@@ -190,6 +206,7 @@
     bindWatch();
     bindAnalyze();
     bindScan();
+    bindRadar();
     bindBacktest();
     bindAlerts();
     bindSettings();
@@ -223,11 +240,27 @@
       ['Electron', info.electron],
       ['Node', info.node],
       ['架构', info.arch],
-      ['模块', '15 个算法模块'],
+      ['模块', '19 个算法模块'],
       ['数据', '本地计算 · 不上传'],
     ]
       .map(([k, v]) => `<div class="kpi"><div class="k">${k}</div><div class="v sm">${esc(v)}</div></div>`)
       .join('');
+
+    // v1.1.0：预设策略与机会雷达的初始化（放在股票池数据就绪之后）
+    initScanPresets();
+    initRadarUniverse();
+    // 恢复上次的机会雷达结果（不必重新扫一遍就能看）
+    try {
+      const last = await qd.radarLast();
+      if (last && last.rows) {
+        state.radar = last;
+        state.radarPick = (last.rows[0] || {}).symbol || null;
+        state.radarNewsPick = state.radarPick;
+        renderRadarAll();
+      }
+    } catch {
+      /* 没有历史结果就保持空状态 */
+    }
 
     renderWatch();
     renderAlerts();
@@ -322,6 +355,8 @@
         if (v === 'risk') { refreshRisk(); }
         if (v === 'alerts') { renderDashboard(); renderAnomalies(); renderRules(); renderAudit(); }
         if (v === 'tax') renderTax();
+        // v1.1.0：机会雷达按当前状态重画，不重复发起网络请求
+        if (v === 'radar') renderRadarAll();
       });
     });
   }
@@ -1175,14 +1210,13 @@
     $('#btnScan').addEventListener('click', runScan);
     $('#btnExport').addEventListener('click', exportCsv);
     $('#scanFilter').addEventListener('change', renderScan);
-    $$('#scanTable th[data-sort]').forEach((th) => {
-      th.addEventListener('click', () => {
-        const k = th.dataset.sort;
-        state.scanSort.dir = state.scanSort.key === k ? -state.scanSort.dir : -1;
-        state.scanSort.key = k;
-        renderScan();
-      });
+    $('#scanColumns').addEventListener('change', () => {
+      state.scanColumns = $('#scanColumns').value;
+      renderScan();
     });
+    // 排序表头由 bindScanSort() 绑定 —— 表头会随视图切换被重建，
+    // 如果在 bindScan 里绑一次就固定住了，切回经典视图后列头会点不动。
+    bindScanSort();
   }
 
   /** 填充 screener.js 的股票池下拉与因子图例 */
@@ -1242,30 +1276,116 @@
     }
   }
 
+  // 因子视图使用的列定义（顺序即渲染顺序）。抽成常量是为了让表头与单元格
+  // 永远用同一份定义驱动 —— 分两处各写一遍是最容易错位的做法。
+  const FACTOR_COLS = [
+    { key: 'composite', label: '综合' },
+    { key: 'trend', label: '趋势' },
+    { key: 'breakout', label: '突破' },
+    { key: 'volumeSurge', label: '量能' },
+    { key: 'elasticity', label: '弹性' },
+    { key: 'compression', label: '压缩' },
+    { key: 'liquidity', label: '流动性' },
+    { key: 'relativeStrength', label: '相对强度' },
+  ];
+
   function renderScan() {
     const minScore = Number($('#scanFilter').value);
     let rows = state.scanResults.filter((r) => r.score >= minScore);
     const { key, dir } = state.scanSort;
-    const getter = (r) => (key === 'rsi' || key === 'ret20' || key === 'volRatio' ? r.metrics[key] : r[key]);
-    rows = rows.slice().sort((a, b) => {
-      const va = getter(a);
-      const vb = getter(b);
-      if (va == null) return 1;
-      if (vb == null) return -1;
-      return dir * (va - vb);
-    });
+
+    // ---- v1.1.0：预设策略筛选
+    let screenRes = null;
+    if (state.preset) {
+      screenRes = applyPresetFilter();
+      if (screenRes && screenRes.empty) {
+        rows = [];
+      } else if (screenRes) {
+        // 用「代码集合」做交集，这样表格拿到的仍然是完整的扫描结果对象，
+        // 不需要为因子视图另外准备一份数据
+        const allow = new Set(screenRes.rows.map((x) => String(x.symbol).toUpperCase()));
+        rows = rows.filter((r) => allow.has(String(r.code).toUpperCase()));
+      }
+    }
+
+    const factorView = state.scanColumns === 'factors' && rows.some((r) => r.factor);
+
+    if (factorView) {
+      rows = rows.slice().sort((a, b) => ((b.factor || {}).composite || 0) - ((a.factor || {}).composite || 0));
+    } else {
+      const getter = (r) => (key === 'rsi' || key === 'ret20' || key === 'volRatio' ? r.metrics[key] : r[key]);
+      rows = rows.slice().sort((a, b) => {
+        const va = getter(a);
+        const vb = getter(b);
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        return dir * (va - vb);
+      });
+    }
+    state.scanViewRows = rows;
+
+    // 筛选摘要（让用户始终知道「现在看到的这一屏是怎么筛出来的」）
+    const sumBox = $('#screenSummary');
+    if (screenRes) {
+      sumBox.style.display = 'block';
+      if (screenRes.empty) {
+        sumBox.innerHTML = `<b>${esc(screenRes.summary)}</b>`;
+      } else {
+        const p = screenRes.preset || {};
+        const conds = (p && p.key ? Screener.PRESET_MAP[p.key].filters : [])
+          .map((f) => `${(Screener.FACTOR_MAP[f.factor] || {}).label || f.factor}${f.min != null ? ' ≥ ' + f.min : ''}`)
+          .join(' · ');
+        sumBox.innerHTML =
+          `<b>${esc(p.label || '预设')}</b>：${esc(screenRes.summary)}` +
+          `<br/>门槛：${esc(conds)}　｜　最大风险提示：<span style="color:var(--orange)">${esc(p.watchOut || '--')}</span>`;
+      }
+    } else {
+      sumBox.style.display = 'none';
+      sumBox.innerHTML = '';
+    }
+
+    // 表头（两套视图）
+    const thead = $('#scanTable thead');
+    if (factorView) {
+      thead.innerHTML = `<tr><th>#</th><th>代码 / 名称</th>${
+        FACTOR_COLS.map((c) => `<th>${esc(c.label)}</th>`).join('')
+      }<th>PE</th><th>操作</th></tr>`;
+    } else {
+      thead.innerHTML = `<tr>
+        <th>#</th><th>代码 / 名称</th>
+        <th data-sort="score">评分</th><th>评级</th>
+        <th data-sort="price">现价</th><th data-sort="changePct">涨跌幅</th>
+        <th data-sort="rsi">RSI</th><th data-sort="ret20">20日涨幅</th><th data-sort="volRatio">量比</th>
+        <th>信号</th><th>操作</th></tr>`;
+      bindScanSort();
+    }
 
     const tb = $('#scanTable tbody');
     $('#scanEmpty').style.display = rows.length ? 'none' : 'block';
     tb.innerHTML = rows
       .map((r, i) => {
+        const f = r.factor || null;
+        if (factorView) {
+          return `<tr>
+            <td class="muted">${i + 1}</td>
+            <td><span class="code" data-open="${esc(r.secid)}" data-code="${esc(r.code)}">${esc(r.code)}</span> <span class="name">${esc(r.name || '')}</span></td>
+            <td><b>${f ? f.composite : '--'}</b></td>
+            ${FACTOR_COLS.slice(1)
+              .map((c) => `<td>${f && f.scores ? miniBar(f.scores[c.key]) : '<span class="muted">--</span>'}</td>`)
+              .join('')}
+            <td>${r.pe == null ? '--' : Number(r.pe).toFixed(1)}</td>
+            <td><button class="btn sm" data-add="${esc(r.secid)}|${esc(r.code)}|${esc(r.name || '')}">加自选</button></td>
+          </tr>`;
+        }
         const rt = factors.rating(r.score);
         const color = r.score >= 66 ? 'var(--up)' : r.score >= 52 ? 'var(--orange)' : 'var(--gray)';
         return `<tr>
           <td class="muted">${i + 1}</td>
           <td><span class="code" data-open="${esc(r.secid)}" data-code="${esc(r.code)}">${esc(
           r.code
-        )}</span> <span class="name">${esc(r.name || '')}</span></td>
+        )}</span> <span class="name">${esc(r.name || '')}</span>${
+          f ? ` <span class="tag gray" title="多因子综合分">因子 ${f.composite}</span>` : ''
+        }</td>
           <td><span class="score-bar"><b class="${rt.cls}" style="color:${color}">${r.score.toFixed(
           1
         )}</b><span class="track"><span class="fill" style="width:${r.score}%;background:${color}"></span></span></span></td>
@@ -1295,11 +1415,29 @@
     );
   }
 
+  /** 经典视图的排序表头（重建表头后必须重新绑定，否则点列头没反应） */
+  function bindScanSort() {
+    $$('#scanTable th[data-sort]').forEach((th) => {
+      th.addEventListener('click', () => {
+        const k = th.dataset.sort;
+        state.scanSort.dir = state.scanSort.key === k ? -state.scanSort.dir : -1;
+        state.scanSort.key = k;
+        renderScan();
+      });
+    });
+  }
+
   function exportCsv() {
     if (!state.scanResults.length) return toast('没有可导出的结果');
-    const head = ['排名', '代码', '名称', '评分', '评级', '现价', '涨跌幅', 'RSI', '20日涨幅', '60日涨幅', '量比', '距高点', '信号'];
+    // v1.1.0：导出「当前屏幕上看到的这一屏」（含预设筛选与排序），
+    // 而不是全量结果 —— 否则导出的 CSV 和界面对不上，复核时会怀疑是哪边错了。
+    const rows = state.scanViewRows && state.scanViewRows.length ? state.scanViewRows : state.scanResults;
+    const fcols = FACTOR_COLS.concat([{ key: 'reversal', label: '反转' }, { key: 'health', label: '回撤健康度' }]);
+    const head = ['排名', '代码', '名称', '评分', '评级', '现价', '涨跌幅', 'RSI', '20日涨幅', '60日涨幅', '量比', '距高点', '信号']
+      .concat(fcols.map((c) => '因子_' + c.label));
     const lines = [head.join(',')];
-    state.scanResults.forEach((r, i) => {
+    rows.forEach((r, i) => {
+      const f = r.factor;
       lines.push(
         [
           i + 1, r.code, `"${(r.name || '').replace(/"/g, '')}"`, r.score.toFixed(1), factors.rating(r.score).label,
@@ -1310,7 +1448,9 @@
           r.metrics.volRatio == null ? '' : r.metrics.volRatio.toFixed(2),
           r.metrics.distHigh == null ? '' : r.metrics.distHigh.toFixed(2),
           `"${(r.signals || []).map((s) => s.text).join(' / ')}"`,
-        ].join(',')
+        ]
+          .concat(fcols.map((c) => (f && f.scores && f.scores[c.key] != null ? f.scores[c.key] : '')))
+          .join(',')
       );
     });
     const blob = new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -3265,6 +3405,482 @@
     a.download = `quantdesk_tax_${state.taxReport.year}.csv`;
     a.click();
     toast('已导出税务明细 CSV');
+  }
+
+  // ------------------------------------------------------------ 预设选股策略（v1.1.0）
+  //
+  // 设计意图：把「选股」这件事从「一堆散装因子」提升为「可解释的交易假设」。
+  // 每个预设都回答了三个问题：它在赌什么逻辑（rationale）、门槛是什么（filters）、
+  // 以及**最容易在哪里亏钱**（watchOut）。第三个问题最重要 —— 没有它，
+  // 预设就变成了「点一下就有票」的许愿池。
+
+  function initScanPresets() {
+    const list = Screener.PRESETS || [];
+    $('#scanPresets').innerHTML = list
+      .map(
+        (p) =>
+          `<div class="preset-item" data-preset="${esc(p.key)}" title="${esc(p.rationale)}">${esc(p.label)}</div>`
+      )
+      .join('');
+    $$('#scanPresets .preset-item').forEach((el) =>
+      el.addEventListener('click', () => selectPreset(el.dataset.preset === state.preset ? '' : el.dataset.preset))
+    );
+  }
+
+  function selectPreset(key) {
+    state.preset = key || '';
+    $$('#scanPresets .preset-item').forEach((el) => el.classList.toggle('on', el.dataset.preset === state.preset));
+    renderPresetDetail();
+    if (state.scanResults.length) renderScan();
+  }
+
+  function renderPresetDetail() {
+    const box = $('#presetDetail');
+    const p = state.preset ? Screener.PRESET_MAP[state.preset] : null;
+    if (!p) {
+      box.classList.remove('show');
+      box.innerHTML = '';
+      $('#presetDesc').textContent =
+        '选择一个预设，可直接筛出对应的候选；也可以只把它当作因子门槛的起点再手动改。';
+      return;
+    }
+    const fmap = Screener.FACTOR_MAP || {};
+    const conds = (p.filters || [])
+      .map((f) => {
+        const label = (fmap[f.factor] || {}).label || f.factor;
+        const parts = [];
+        if (f.min != null) parts.push(`≥ ${f.min}`);
+        if (f.max != null) parts.push(`≤ ${f.max}`);
+        return `<code>${esc(label)}</code> ${parts.join(' 且 ')}`;
+      })
+      .join('　');
+    const uni = (Screener.UNIVERSE_RAW[p.universe] || {}).label || p.universe;
+    box.innerHTML = `
+      <div class="pd-row"><span class="pd-k">交易逻辑</span><span class="pd-v">${esc(p.rationale)}</span></div>
+      <div class="pd-row"><span class="pd-k">因子门槛</span><span class="pd-v">${conds || '无（仅排序）'}</span></div>
+      <div class="pd-row"><span class="pd-k">建议池子</span><span class="pd-v">${esc(uni)}${p.limit ? `　取前 ${p.limit} 只` : ''}</span></div>
+      <div class="pd-row"><span class="pd-k">最大风险</span><span class="pd-v warn">${esc(p.watchOut || '--')}</span></div>`;
+    box.classList.add('show');
+    $('#presetDesc').textContent = p.desc;
+  }
+
+  /**
+   * 用当前预设对扫描结果做筛选。
+   * 注意：预设的 filters 用的是「因子分（0-100）」，与扫描页原来的总评分（0-100）
+   * 是两套口径 —— 前者来自 screener.js 的 16 因子体系，后者来自 factors.js 的 6 维打分。
+   * 两套都保留，界面上要标清楚用的是什么，别让人以为是同一个分数。
+   */
+  function applyPresetFilter() {
+    const p = state.preset ? Screener.PRESET_MAP[state.preset] : null;
+    if (!p) return null;
+    const items = state.scanResults.filter((r) => r.factor).map((r) => ({ ...r.factor, _src: r }));
+    if (!items.length) {
+      return { rows: [], empty: true, summary: '本次扫描结果里没有因子数据。请重新扫描一次（v1.1.0 起扫描会同时计算多因子分）。' };
+    }
+    const res = Screener.screen(items, { preset: p });
+    return { ...res, items };
+  }
+
+  // ------------------------------------------------------------ 机会雷达（v1.1.0）
+
+  function bindRadar() {
+    $('#btnRadar').addEventListener('click', runRadarScan);
+    $('#btnRadarExport').addEventListener('click', radarExport);
+    $('#radarUniverse').addEventListener('change', () => {
+      state.radarUniverse = $('#radarUniverse').value;
+    });
+    $('#radarGradeFilter').addEventListener('change', () => {
+      state.radarGrade = $('#radarGradeFilter').value;
+      renderRadarTable();
+    });
+    $('#radarSort').addEventListener('change', () => {
+      state.radarSort = $('#radarSort').value;
+      renderRadarTable();
+    });
+    $('#radarInsightPick').addEventListener('change', () => {
+      state.radarPick = $('#radarInsightPick').value;
+      renderInsightPanel();
+    });
+    $('#radarNewsPick').addEventListener('change', () => {
+      state.radarNewsPick = $('#radarNewsPick').value;
+      renderNewsPanel();
+    });
+    $('#radarNewsSort').addEventListener('change', renderNewsPanel);
+    $('#radarEventScope').addEventListener('change', renderEventPanel);
+    // 因子/风险/机会点折叠：用事件委托，表格重绘后依然有效
+    $('#radarInsightPanel').addEventListener('click', (e) => {
+      const hd = e.target.closest('.ins-item > .ii-hd');
+      if (hd) hd.parentElement.classList.toggle('open');
+    });
+  }
+
+  function initRadarUniverse() {
+    const us = Screener.universes(state.watchlist.map((w) => w.code));
+    const keys = Object.keys(us);
+    // 默认用「高贝塔弹性池」：机会雷达的目的就是找弹性，默认池子要匹配用途
+    const def = keys.includes('highbeta') ? 'highbeta' : keys.includes('nasdaq100') ? 'nasdaq100' : keys[0];
+    $('#radarUniverse').innerHTML = keys
+      .map((k) => `<option value="${esc(k)}">${esc(us[k].label)} · ${us[k].codes.length} 只</option>`)
+      .join('');
+    state.radarUniverse = def;
+    $('#radarUniverse').value = def;
+  }
+
+  async function runRadarScan() {
+    const btn = $('#btnRadar');
+    btn.disabled = true;
+    setStatus(true, '机会雷达扫描中…');
+    $('#radarBar').style.width = '0%';
+    const off = qd.onRadarProgress((p) => {
+      const pctv = p.total ? Math.round((p.done / p.total) * 100) : 0;
+      $('#radarBar').style.width = pctv + '%';
+      $('#radarText').textContent = `${p.stage || ''} ${p.done || 0}/${p.total || 0} · ${p.current || ''}`;
+    });
+    try {
+      const res = await qd.radarRun({
+        universe: $('#radarUniverse').value,
+        limit: Number($('#radarLimit').value),
+        includeNews: $('#radarOptNews').checked,
+        includeEvents: $('#radarOptEvents').checked,
+        includeExtras: $('#radarOptExtras').checked,
+        eventDays: Number($('#radarEventDays').value),
+        minAmount: Number($('#radarMinAmount').value) || 0,
+        newsTop: 12,
+        extrasTop: 10,
+      });
+      if (res.error) return toast(res.error);
+      state.radar = res;
+      state.radarPick = (res.rows[0] || {}).symbol || null;
+      state.radarNewsPick = state.radarPick;
+      renderRadarAll();
+      toast(`机会雷达完成：${res.rows.length} 只深挖，A/B 级 ${(res.poolMoonshot.distribution.A || 0) + (res.poolMoonshot.distribution.B || 0)} 只`);
+    } catch (e) {
+      toast('扫描失败：' + (e.message || '请稍后重试'));
+    } finally {
+      off();
+      btn.disabled = false;
+      setStatus(false, '就绪');
+      $('#radarBar').style.width = '100%';
+    }
+  }
+
+  function renderRadarAll() {
+    renderRadarKpi();
+    renderRadarTable();
+    renderRadarPickers();
+    renderInsightPanel();
+    renderNewsPanel();
+    renderEventPanel();
+  }
+
+  function renderRadarPickers() {
+    const r = state.radar;
+    const opts = (r ? r.rows : [])
+      .map((x) => `<option value="${esc(x.symbol)}">${esc(x.symbol)} ${esc(x.name || '')} · ${x.moonshot ? x.moonshot.grade : '-'} 级</option>`)
+      .join('');
+    $('#radarInsightPick').innerHTML = opts || '<option value="">（无）</option>';
+    $('#radarNewsPick').innerHTML = opts || '<option value="">（无）</option>';
+    if (state.radarPick) $('#radarInsightPick').value = state.radarPick;
+    if (state.radarNewsPick) $('#radarNewsPick').value = state.radarNewsPick;
+  }
+
+  function renderRadarKpi() {
+    const box = $('#radarKpi');
+    const r = state.radar;
+    if (!r) {
+      box.innerHTML = '';
+      $('#radarTableMeta').textContent = '尚未扫描';
+      return;
+    }
+    const d = r.poolMoonshot ? r.poolMoonshot.distribution : { A: 0, B: 0, C: 0, D: 0 };
+    const bench = r.benchmark;
+    const mr = r.marketRisk || {};
+    const next = (r.marketEvents || [])[0];
+    const kpis = [
+      ['深挖标的', `${r.rows.length} 只`, ''],
+      ['A / B 级', `${(d.A || 0)} / ${(d.B || 0)}`, d.A ? 'up' : ''],
+      ['基准 20 日', bench ? pct(bench.ret20) : '--', bench ? cls(bench.ret20) : ''],
+      ['基准 60 日', bench ? pct(bench.ret60) : '--', bench ? cls(bench.ret60) : ''],
+      ['事件风险', mr.level ? `${mr.level}（${mr.score}）` : '--', mr.level === '高' ? 'down' : ''],
+      ['最近事件', next ? `${next.daysAway} 天后` : '--', ''],
+      ['新闻覆盖', `${(r.rows || []).filter((x) => (x.news || []).length).length} 只`, ''],
+      ['耗时', `${(r.costMs / 1000).toFixed(1)}s`, ''],
+    ];
+    box.innerHTML = kpis
+      .map(
+        ([k, v, c]) =>
+          `<div class="kpi"><div class="k">${esc(k)}</div><div class="v sm ${c}">${esc(String(v))}</div></div>`
+      )
+      .join('');
+    const degraded = [];
+    if (r.degraded && r.degraded.news) degraded.push('新闻');
+    if (r.degraded && r.degraded.events) degraded.push('事件日历');
+    if (r.degraded && r.degraded.extras) degraded.push('空头/分析师数据');
+    $('#radarTableMeta').textContent = degraded.length
+      ? `⚠️ ${degraded.join('、')} 本次未取到（数据源不可达），相关结论已在下方标注为缺失 —— 不要把「没有数据」误读成「没有风险」。`
+      : `扫描于 ${new Date(r.scannedAt).toLocaleString('zh-CN')} · ${r.rows.length} 只 · ${(r.costMs / 1000).toFixed(1)}s`;
+  }
+
+  function miniBar(v, invert) {
+    if (v == null) return '<span class="muted">--</span>';
+    const val = Math.round(v);
+    const lv = val >= 80 ? 5 : val >= 65 ? 4 : val >= 50 ? 3 : val >= 35 ? 2 : 1;
+    const colorClass = invert ? `lv${6 - lv}` : `lv${lv}`;
+    return `<span class="mini"><span class="mt"><span class="mf ${colorClass}" style="width:${val}%"></span></span><span class="mv">${val}</span></span>`;
+  }
+
+  function renderRadarTable() {
+    const r = state.radar;
+    const tb = $('#radarTable tbody');
+    if (!r || !r.rows.length) {
+      tb.innerHTML = '';
+      $('#radarEmpty').style.display = 'block';
+      return;
+    }
+    $('#radarEmpty').style.display = 'none';
+    let rows = r.rows.slice();
+    if (state.radarGrade) {
+      const allow = new Set(state.radarGrade.split(','));
+      rows = rows.filter((x) => x.moonshot && allow.has(x.moonshot.grade));
+    }
+    const sortKey = state.radarSort;
+    rows.sort((a, b) => {
+      if (sortKey === 'net') return ((b.insight && b.insight.scores.netAdjusted) || 0) - ((a.insight && a.insight.scores.netAdjusted) || 0);
+      if (sortKey === 'opportunity') return ((b.insight && b.insight.scores.opportunity) || 0) - ((a.insight && a.insight.scores.opportunity) || 0);
+      if (sortKey === 'factor') return (b.factorComposite || 0) - (a.factorComposite || 0);
+      return ((b.moonshot && b.moonshot.score) || 0) - ((a.moonshot && a.moonshot.score) || 0);
+    });
+
+    tb.innerHTML = rows
+      .map((x) => {
+        const m = x.moonshot || {};
+        const p = m.parts || {};
+        const ins = x.insight && x.insight.scores ? x.insight.scores : {};
+        const opp = ins.opportunity;
+        const rsk = ins.risk;
+        const net = ins.netAdjusted;
+        const netCls = net == null ? '' : net >= 10 ? 'up' : net <= -10 ? 'down' : '';
+        return `<tr>
+          <td><span class="grade ${esc(m.grade || '-')}" title="${esc(m.summary || '')}">${esc(m.grade || '-')}</span></td>
+          <td><span class="code" data-open="${esc(x.secid)}" data-code="${esc(x.symbol)}">${esc(x.symbol)}</span> <span class="name">${esc(x.name || '')}</span></td>
+          <td><b class="${netCls}">${m.score == null ? '--' : m.score.toFixed(1)}</b></td>
+          <td>${miniBar(p.elasticity)}</td>
+          <td>${miniBar(p.compression)}</td>
+          <td>${miniBar(p.volume)}</td>
+          <td>${miniBar(p.momentum)}</td>
+          <td>${miniBar(p.position)}</td>
+          <td>${miniBar(p.shortFuel)}</td>
+          <td class="num"><span class="up">${opp == null ? '--' : opp}</span> / <span class="down">${rsk == null ? '--' : rsk}</span> <span class="muted">(净 ${net == null ? '--' : net})</span></td>
+          <td>${f2(x.price)}</td>
+          <td class="${cls(x.changePct)}">${pct(x.changePct)}</td>
+          <td><button class="btn sm" data-insight="${esc(x.symbol)}">详情</button></td>
+        </tr>`;
+      })
+      .join('');
+
+    tb.querySelectorAll('[data-open]').forEach((b) =>
+      b.addEventListener('click', () => openAnalyze(b.dataset.open, b.dataset.code))
+    );
+    tb.querySelectorAll('[data-insight]').forEach((b) =>
+      b.addEventListener('click', () => {
+        state.radarPick = b.dataset.insight;
+        state.radarNewsPick = b.dataset.insight;
+        $('#radarInsightPick').value = state.radarPick;
+        $('#radarNewsPick').value = state.radarNewsPick;
+        renderInsightPanel();
+        renderNewsPanel();
+        $('#radarInsightPanel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      })
+    );
+    if (state.radarPick) $('#radarInsightPick').value = state.radarPick;
+    if (state.radarNewsPick) $('#radarNewsPick').value = state.radarNewsPick;
+  }
+
+  const INS_LIST_LIMIT = 40;
+
+  function insItemHtml(it, kind) {
+    const score = kind === 'opp' ? it.strength : it.severity;
+    const ev = it.evidence ? `<span class="ev">${esc(it.evidence)}</span>` : '';
+    return `<div class="ins-item ${kind}">
+      <div class="ii-hd">
+        <span class="ii-caret">▶</span>
+        <span class="ii-label">${esc(it.label)}</span>
+        <span class="ii-bar"><i style="width:${score}%"></i></span>
+        <span class="ii-num">${score}</span>
+      </div>
+      <div class="ii-bd">${ev}<span class="why">${esc(it.desc || '')}</span></div>
+    </div>`;
+  }
+
+  function renderInsightPanel() {
+    const r = state.radar;
+    const panel = $('#radarInsightPanel');
+    if (!r || !state.radarPick) {
+      panel.style.display = 'none';
+      return;
+    }
+    const x = r.rows.find((v) => v.symbol === state.radarPick);
+    if (!x) {
+      panel.style.display = 'none';
+      return;
+    }
+    panel.style.display = 'block';
+    const ins = x.insight || {};
+    const s = ins.scores || {};
+    const st = ins.stance || {};
+    const dte = x.daysToEarnings;
+    const si = x.shortInterest;
+    const an = x.analyst;
+
+    $('#radarInsightMeta').textContent = `${x.symbol} · ${(ins.opportunities || []).length} 项机会 / ${(ins.risks || []).length} 项风险`;
+
+    const stanceCls = st.key === 'bullish' || st.key === 'lean-bull' ? 'up' : st.key === 'bearish' || st.key === 'lean-bear' ? 'down' : '';
+    $('#insightHead').innerHTML = `
+      <span class="ih-sym">${esc(x.symbol)}</span>
+      <span class="ih-name">${esc(x.name || '')}</span>
+      <span class="pill subtle">${esc(x.group || '')}</span>
+      <span class="pill ${x.moonshot ? (x.moonshot.grade === 'A' ? 'up' : x.moonshot.grade === 'B' ? 'warn' : 'subtle') : 'subtle'}">暴涨潜力 ${x.moonshot ? x.moonshot.grade + ' · ' + x.moonshot.score.toFixed(1) : '--'}</span>
+      <span class="ih-spacer"></span>
+      <span class="ih-score"><span class="k">机会</span><span class="v up">${s.opportunity == null ? '--' : s.opportunity}</span></span>
+      <span class="ih-score"><span class="k">风险</span><span class="v down">${s.risk == null ? '--' : s.risk}</span></span>
+      <span class="ih-score"><span class="k">净分</span><span class="v ${stanceCls}">${s.netAdjusted == null ? '--' : s.netAdjusted}</span></span>
+      <span class="ih-score"><span class="k">立场</span><span class="v ${stanceCls}" style="font-size:12px">${esc(st.label || '--')}</span></span>
+      <span class="ih-note">
+        ${esc(st.note || '')}
+        ${dte ? ` ｜ 距下次财报 <b>${dte.days} 天</b>（${esc(dte.date)}${dte.time ? ' ' + esc(dte.time) : ''}${dte.epsForecast ? '，预期 EPS ' + esc(dte.epsForecast) : ''}${dte.estimated ? '，日期为估算' : ''}）` : ' ｜ 未取到财报排期'}
+        ${si ? ` ｜ 空头回补天数 <b>${si.latest.daysToCover == null ? '--' : si.latest.daysToCover.toFixed(2)}</b>（${esc(si.latest.settlementDate)}，${si.trend === 'up' ? '上升' : si.trend === 'down' ? '下降' : '持平'}）` : ' ｜ 未取到空头数据'}
+        ${an && an.priceTarget ? ` ｜ 共识目标价 <b>$${an.priceTarget.toFixed(2)}</b>（${an.buy || 0}买/${an.hold || 0}持/${an.sell || 0}卖，趋势${an.trend === 'up' ? '上调' : an.trend === 'down' ? '下调' : '持平'}）` : ' ｜ 未取到分析师目标价'}
+        ${x.extrasErrors && Object.keys(x.extrasErrors).length ? ` ｜ <span class="muted">部分增强数据缺失：${esc(Object.keys(x.extrasErrors).join('、'))}</span>` : ''}
+      </span>`;
+
+    const opps = ins.opportunities || [];
+    const rsks = ins.risks || [];
+    $('#oppCount').textContent = opps.length;
+    $('#riskCount').textContent = rsks.length;
+    $('#oppList').innerHTML = opps.length
+      ? opps.slice(0, INS_LIST_LIMIT).map((it) => insItemHtml(it, 'opp')).join('')
+      : '<div class="empty" style="padding:22px 8px">未触发任何机会阈值。<br/>这不代表没有机会，只说明按当前规则没有可验证的上行理由 —— 而这个结论本身也有价值。</div>';
+    $('#riskList').innerHTML = rsks.length
+      ? rsks.slice(0, INS_LIST_LIMIT).map((it) => insItemHtml(it, 'rsk')).join('')
+      : '<div class="empty" style="padding:22px 8px">未触发任何风险阈值。</div>';
+
+    const ms = x.moonshot || {};
+    $('#insightFoot').innerHTML = `
+      <div style="margin-bottom:6px"><b style="color:var(--text-2)">触发条件</b>：${(ms.triggers || []).map((t) => esc(t)).join(' ／ ') || '--'}</div>
+      <div style="margin-bottom:6px"><b style="color:var(--text-2)">失效条件</b>：${(ms.invalidation || []).map((t) => esc(t)).join(' ／ ') || '--'}</div>
+      <div style="margin-bottom:6px"><b style="color:var(--orange)">风险标记</b>：${(ms.riskFlags || []).map((t) => esc(t)).join(' ／ ') || '无'}</div>
+      ${ms.liquidityNote ? `<div style="margin-bottom:6px"><b style="color:var(--orange)">流动性</b>：${esc(ms.liquidityNote)}</div>` : ''}
+      <div>${esc(ins.disclaimer || '')}</div>`;
+  }
+
+  function renderNewsPanel() {
+    const r = state.radar;
+    if (!r || !state.radarNewsPick) {
+      $('#radarNewsList').innerHTML = '';
+      $('#radarNewsSummary').innerHTML = '';
+      return;
+    }
+    const x = r.rows.find((v) => v.symbol === state.radarNewsPick);
+    if (!x) return;
+    let list = (x.news || []).slice();
+    const sortKey = $('#radarNewsSort').value;
+    if (sortKey === 'senti') list.sort((a, b) => Math.abs(b.senti) - Math.abs(a.senti));
+    else list.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+
+    const ns = x.newsSummary;
+    if (ns) {
+      const moodCls = ns.sentiment >= 8 ? 'pos' : ns.sentiment <= -8 ? 'neg' : '';
+      $('#radarNewsSummary').innerHTML =
+        `<span class="mood ${moodCls}">情绪 ${ns.sentiment}</span> · ${esc(ns.summary)}` +
+        (ns.focus ? `<br/><span class="muted">其中 ${ns.focus.title || 0} 条标题即命中（直接报道），${ns.focus.body || 0} 条为正文提及 —— 提及类新闻的情绪已按 0.7 折算。</span>` : '');
+    } else {
+      $('#radarNewsSummary').innerHTML =
+        '<span class="muted">没有抓到与该标的直接相关的新闻。注意：抓不到 ≠ 没有消息，只说明当前数据源无收录。</span>';
+    }
+
+    $('#radarNewsMeta').textContent = `${x.symbol} · ${list.length} 条`;
+    $('#radarNewsList').innerHTML = list.length
+      ? list
+          .map((n) => {
+            const sc = n.senti > 8 ? 'pos' : n.senti < -8 ? 'neg' : 'neu';
+            const hits = (n.sentiHits || [])
+              .slice(0, 4)
+              .map((h) => `<span class="tag ${h.weight > 0 ? 'bull' : 'bear'}">${esc(h.word)}</span>`)
+              .join('');
+            const focusTag =
+              n.sentiFocus === 'title'
+                ? '<span class="tag warn">直接报道</span>'
+                : n.sentiFocus === 'body'
+                ? '<span class="tag gray">正文提及</span>'
+                : '<span class="tag gray">关联较弱</span>';
+            return `<div class="news-item">
+              <div class="ni-side"><span class="ni-senti ${sc}">${n.senti > 0 ? '+' : ''}${n.senti}</span><span class="ni-age">${n.ageHours == null ? '' : n.ageHours < 24 ? n.ageHours + 'h' : Math.round(n.ageHours / 24) + 'd'}</span></div>
+              <div class="ni-main">
+                <div class="ni-title" data-url="${esc(n.url || '')}">${esc(n.title)}</div>
+                ${n.sentiSentence ? `<div class="ni-excerpt">命中句：${esc(n.sentiSentence)}</div>` : ''}
+                <div class="ni-meta">${focusTag}${n.topicLabel ? `<span class="tag gray">${esc(n.topicLabel)}</span>` : ''}${hits}<span class="muted" style="font-size:10px">${esc(n.date || '')} · ${esc(n.source || '')}</span></div>
+              </div>
+            </div>`;
+          })
+          .join('')
+      : '<div class="empty" style="padding:26px 8px">没有相关新闻</div>';
+
+    $$('#radarNewsList .ni-title').forEach((el) =>
+      el.addEventListener('click', () => {
+        const u = el.dataset.url;
+        if (u) qd.openExternal(u);
+      })
+    );
+  }
+
+  function renderEventPanel() {
+    const r = state.radar;
+    if (!r) {
+      $('#radarEventList').innerHTML = '';
+      $('#radarEventRisk').innerHTML = '';
+      return;
+    }
+    const scope = $('#radarEventScope').value;
+    let list = (r.marketEvents || []).concat((r.events || []));
+    if (scope === 'market') list = list.filter((e) => e.scope === 'market');
+    if (scope === 'company') list = list.filter((e) => e.scope === 'company');
+    list = list.slice().sort((a, b) => a.daysAway - b.daysAway);
+
+    const mr = r.marketRisk || {};
+    $('#radarEventRisk').innerHTML = mr.level
+      ? `<span class="callout-tag">事件风险 ${mr.level}（${mr.score}）</span><span class="callout-text">${esc(mr.note)}</span>`
+      : '<span class="callout-text">未取到宏观事件数据。</span>';
+
+    $('#radarEventMeta').textContent = `${list.length} 项 · 宏观来源 Fed/BLS/BEA，财报来自 nasdaq`;
+    $('#radarEventList').innerHTML = list.length
+      ? list
+          .map((e) => {
+            const k = e.kind || 'macro';
+            const soon = e.daysAway <= 3 ? ' soon' : '';
+            const est = e.estimated ? ' <span class="est">（估算）</span>' : '';
+            const t = e.time ? esc(e.time) + ' ' : '';
+            return `<div class="event-item ${esc(k)}">
+              <span class="ei-date">${esc(e.date)}</span>
+              <span class="ei-days${soon}">${e.daysAway === 0 ? '今天' : e.daysAway + ' 天'}</span>
+              <span class="ei-main">
+                <span class="ei-title">${e.symbol ? `<b>${esc(e.symbol)}</b> ` : ''}${esc(e.event || '')}</span>
+                <span class="ei-src">${t}${esc(e.source || '')}${est}${e.epsForecast ? ' · 预期 EPS ' + esc(e.epsForecast) : ''}</span>
+              </span>
+            </div>`;
+          })
+          .join('')
+      : '<div class="empty" style="padding:26px 8px">窗口内没有事件</div>';
+  }
+
+  function radarExport() {
+    if (!state.radar) return toast('还没有扫描结果');
+    const blob = new Blob([JSON.stringify(state.radar, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `QuantDesk-radar-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('已导出 JSON（含全部原始数据，可用于复核）');
   }
 
   // ------------------------------------------------------------ 设置

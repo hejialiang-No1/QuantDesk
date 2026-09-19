@@ -21,6 +21,11 @@ const Paper = require('../src/shared/paper');
 const Broker = require('../src/shared/broker');
 const Screener = require('../src/shared/screener');
 const Alerts = require('../src/shared/alerts');
+// v1.1.0
+const NF = require('../src/shared/newsfeed');
+const EV = require('../src/shared/events');
+const INS = require('../src/shared/insight');
+const MOON = require('../src/shared/moonshot');
 
 ds.initCache(path.join(os.tmpdir(), 'quantdesk-smoke-cache'));
 
@@ -578,7 +583,7 @@ function ok(name, cond, extra) {
     check('标普池成分数 ≥ 60', us.sp500.codes.length >= 60, `${us.sp500.codes.length} 只`);
     check('自选池绑定传入的代码', us.watch.codes[0] === 'NVDA');
     const f = Screener.computeFactors({ bars, quote: { pe: 25, marketCap: 1e11 }, rank: { capPercentile: 40 } });
-    check('六因子全部产出且 0–100', f && Object.keys(f.scores).length === 6 && Object.values(f.scores).every((v) => v >= 0 && v <= 100), JSON.stringify(f.scores));
+    check('十六因子全部产出且 0–100', f && Object.keys(f.scores).length === 16 && Object.values(f.scores).every((v) => v >= 0 && v <= 100), `${Object.keys(f.scores).length} 个因子`);
     check('因子类型诚实标注（quality/revision 为代理）', Screener.FACTORS.find((x) => x.key === 'quality').type === 'proxy');
     const ps = Screener.paramScan(bars, 'ma_cross', { fast: [5, 10], slow: [20, 30] }, { backtestFn: BT, metric: 'sharpe' });
     check('参数扫描产出有效组合与稳健性判断', ps.valid === 4 && typeof ps.robust === 'boolean', `${ps.valid} 组 · ${ps.robust ? '平坦' : '孤峰'}`);
@@ -621,6 +626,170 @@ function ok(name, cond, extra) {
     const hb2 = Alerts.heartbeat({ lastBeatAt: Date.now() - 200000, intervalMs: 30000 });
     check('心跳丢失判定', hb2.alive === false, hb2.label);
     check('默认规则 5 条', Alerts.defaultRules().length === 5);
+  }
+
+  // 22) v1.1.0 新闻聚合
+  console.log('\n--- 新闻聚合（newsfeed.js） ---');
+  {
+    const pos = NF.sentiment('英伟达业绩超预期，多家投行上调目标价', '');
+    check('利多标题情绪为正', pos.score > 0, `score=${pos.score}`);
+    const neg = NF.sentiment('公司被曝财务造假，股价暴跌', '');
+    check('利空标题情绪为负', neg.score < 0, `score=${neg.score}`);
+    check('情绪被截断在 ±100', NF.sentiment('超预期 超预期 超预期 超预期 超预期 超预期 超预期 超预期', '').score <= 100);
+
+    // 词边界：这是「AI」不能命中「said」这类误伤的第一道防线
+    check('英文短代码按词边界匹配（AI 不命中 said）', NF.wordHit('he said hello', 'AI') === false && NF.wordHit('AI is hot', 'AI') === true);
+    check('中文词直接包含匹配', NF.wordHit('英伟达发布新品', '英伟达') === true);
+
+    const rawNews = [
+      { title: 'PLTR 获国防部大单，订单金额超预期', content: '', date: '2026-09-18 10:00:00' },
+      { title: 'PLTR 获国防部大单，订单金额超预期', content: '重复条目', date: '2026-09-18 10:00:00' },
+      { title: '智谱AI概念大爆发，传智教育7连板', content: '与 PLTR 无关的泛市场新闻', date: '2026-09-18 11:00:00' },
+    ];
+    const deduped = NF.dedupe(rawNews);
+    check('去重：同标题只保留一条', deduped.length === 2, `${rawNews.length} → ${deduped.length}`);
+
+    const rel = NF.relevant(deduped, { symbol: 'PLTR', name: 'Palantir' }, { strict: true });
+    check('相关性过滤剔除泛市场新闻', rel.length === 1 && rel[0].title.includes('PLTR'), `保留 ${rel.length} 条`);
+
+    const scored = NF.score(
+      NF.fromEastmoney([
+        { title: '早报丨油价回落，市场淡化加息影响', content: 'PLTR 业绩双双超预期，刺激股价盘后涨超14%。', date: '2026-09-18 08:00:00' },
+      ], 'PLTR'),
+      { keysOf: () => ['PLTR', 'Palantir'] }
+    );
+    check('句子级情绪：只看提到该标的的那句话', scored[0].senti > 0 && scored[0].sentiFocus === 'body', `senti=${scored[0].senti} focus=${scored[0].sentiFocus}`);
+
+    const sum = NF.summarize(scored);
+    check('汇总结构完整且带聚焦统计', sum.count === 1 && sum.focus && typeof sum.summary === 'string', sum.summary.slice(0, 40));
+    check('空列表不装作有数据', NF.summarize([]).summary.includes('抓不到'));
+
+    const fresh = NF.freshness(new Date().toISOString());
+    const old = NF.freshness(new Date(Date.now() - 10 * 86400000).toISOString());
+    check('时效衰减：新新闻权重高于旧新闻', fresh > old * 2, `${fresh.toFixed(2)} vs ${old.toFixed(2)}`);
+  }
+
+  // 23) v1.1.0 事件日历
+  console.log('\n--- 事件日历（events.js） ---');
+  {
+    // ★ 回归测试：dayStart 必须支持时间戳。
+    //   漏掉这一支时 from 会变成 NaN，导致所有日期比较为 false，
+    //   表现为「事件日历永远空」且不报错 —— 静默失效，必须钉死。
+    const today = EV.dayStart(Date.now());
+    check('dayStart 支持时间戳输入（回归）', Number.isFinite(today) && today > 0, new Date(today).toDateString());
+
+    const u45 = EV.upcoming({ days: 45 });
+    check('未来 45 天能取到事件', u45.length >= 10, `${u45.length} 项`);
+    check('事件带天数差且非负', u45.every((e) => e.daysAway >= 0), `最近：${u45[0] ? u45[0].event + ' ' + u45[0].daysAway + '天后' : '--'}`);
+    check('事件按时间升序', u45.every((e, i) => i === 0 || u45[i - 1].daysAway <= e.daysAway));
+    check('每条事件都标注来源', u45.every((e) => !!e.source));
+    check('估算日期如实标注 estimated', u45.some((e) => e.estimated === true) && u45.some((e) => e.estimated === false));
+
+    const r7 = EV.riskProfile(EV.upcoming({ days: 7 }).filter((e) => e.scope === 'market'));
+    const r45 = EV.riskProfile(u45.filter((e) => e.scope === 'market'));
+    check('事件风险分随窗口变化（不是恒顶格）', r45.score > r7.score, `7天=${r7.score} 45天=${r45.score}`);
+
+    // 期权到期必须是「每月第三个星期五」
+    const exp = EV.optionExpiries(new Date(), 0, 3);
+    const okExp = exp.every((e) => {
+      const d = new Date(e.date + 'T00:00:00');
+      return d.getDay() === 5 && d.getDate() >= 15 && d.getDate() <= 21;
+    });
+    // 注意：当月若已过第三个周五，会被跳过（这是正确行为，不是 bug），所以断言是 >= 2
+    check('期权到期日为每月第三个星期五', okExp && exp.length >= 2, exp.map((e) => e.date).join(' '));
+    const witch = exp.filter((e) => e.type === 'tripleWitching');
+    check('三重巫日只落在 3/6/9/12 月', witch.every((e) => [3, 6, 9, 12].includes(new Date(e.date + 'T00:00:00').getMonth() + 1)));
+
+    const dte = EV.daysToEarnings('NVDA', [{ symbol: 'NVDA', date: EV.fmtDay(Date.now() + 5 * 86400000), time: '盘后' }]);
+    check('距财报天数计算正确', dte && dte.days === 5, dte ? `${dte.days} 天` : '未命中');
+    check('没有排期时返回 null 而不是猜一个', EV.daysToEarnings('NOPE', []) === null);
+  }
+
+  // 24) v1.1.0 风险点与机会点
+  console.log('\n--- 风险机会引擎（insight.js） ---');
+  {
+    // 合成一段「稳步上涨 + 放量」的 K 线：应触发多头排列等机会点
+    const mkBars = (fn, n = 160) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const c = fn(i);
+        out.push({ date: `d${i}`, open: c * 0.995, close: c, high: c * 1.008, low: c * 0.992, volume: 1e6 * (1 + i / n), amount: c * 1e6 });
+      }
+      return out;
+    };
+    const upBars = mkBars((i) => 100 * Math.pow(1.0035, i));
+    const upIns = INS.analyze({ bars: upBars, quote: { code: 'T', name: 'UP', price: upBars[upBars.length - 1].close, marketCap: 5e9 }, benchmark: { ret20: 1 } });
+    check('趋势向上的标产出机会点', upIns.opportunities.length >= 2, upIns.opportunities.map((x) => x.label).join('、'));
+    check('风险调整净分为正且立场明确', upIns.scores.netAdjusted > 0 && !!upIns.stance.key, `${upIns.scores.netAdjusted} · ${upIns.stance.label}`);
+    check('每条结论都带可复核的证据', upIns.opportunities.every((x) => !!x.evidence) && upIns.risks.every((x) => !!x.evidence));
+
+    const parabolic = mkBars((i) => (i < 130 ? 100 * Math.pow(1.0005, i) : 100 * Math.pow(1.0005, 130) * Math.pow(1.05, i - 130)));
+    const parIns = INS.analyze({ bars: parabolic, quote: { code: 'P', name: 'PARA', price: parabolic[parabolic.length - 1].close } });
+    check('抛物线上涨触发过热类风险', parIns.risks.some((r) => ['parabolic', 'overbought', 'highVol'].includes(r.key)), parIns.risks.map((r) => r.label).join('、') || '（无）');
+
+    const downBars = mkBars((i) => 100 * Math.pow(0.9965, i));
+    const downIns = INS.analyze({ bars: downBars, quote: { code: 'D', name: 'DOWN', price: downBars[downBars.length - 1].close } });
+    check('趋势向下的标风险占优', downIns.risks.length >= 1 && downIns.scores.netAdjusted < 0, `${downIns.scores.netAdjusted} · ${downIns.stance.label}`);
+    check('K线不足时如实报错', INS.analyze({ bars: upBars.slice(0, 30), quote: {} }).error != null);
+    check('并列声明不构成投资建议', upIns.disclaimer.includes('不构成投资建议'));
+  }
+
+  // 25) v1.1.0 暴涨雷达
+  console.log('\n--- 暴涨雷达（moonshot.js） ---');
+  {
+    const mkBars = (fn, n = 200, vol = 1) => {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const c = fn(i);
+        out.push({ date: `d${i}`, open: c * 0.99, close: c, high: c * 1.02, low: c * 0.98, volume: 1e6 * vol * (1 + (i % 5) * 0.1), amount: c * 1e6 * vol });
+      }
+      return out;
+    };
+    // 高弹性、压缩、贴高点的标的（应当得分高于平庸标的）
+    const hot = mkBars((i) => {
+      const base = 50 * Math.pow(1.002, i);
+      return base * (1 + 0.06 * Math.sin(i / 3));
+    });
+    const dull = mkBars((i) => 100 * Math.pow(1.0002, i), 200, 0.6);
+    const mHot = MOON.score({ bars: hot, quote: { code: 'HOT', name: 'Hot', marketCap: 2e9, floatCap: 2e9 }, benchmark: { ret20: 0 } });
+    const mDull = MOON.score({ bars: dull, quote: { code: 'DUL', name: 'Dull', marketCap: 5e11, floatCap: 5e11 }, benchmark: { ret20: 0 } });
+    check('暴涨潜力分在 0–100', mHot.score >= 0 && mHot.score <= 100, `HOT=${mHot.score}`);
+    check('高弹性标的得分高于低波大盘标的', mHot.score > mDull.score, `${mHot.score} vs ${mDull.score}`);
+    check('给出等级 A/B/C/D', ['A', 'B', 'C', 'D'].includes(mHot.grade));
+    check('必须给出触发条件', Array.isArray(mHot.triggers) && mHot.triggers.length > 0);
+    check('必须给出失效条件', Array.isArray(mHot.invalidation) && mHot.invalidation.length > 0);
+    check('必须并列展示风险标记字段', Array.isArray(mHot.riskFlags));
+    check('明确声明高分不等于上涨概率', mHot.note.includes('不是上涨概率'));
+
+    // 流动性否决：成交额极低的标的不得拿到 A 级
+    const illiquid = mkBars((i) => 50 * (1 + 0.06 * Math.sin(i / 3)));
+    illiquid.forEach((b) => { b.volume = 100; b.amount = 1e4; });
+    const mIll = MOON.score({ bars: illiquid, quote: { code: 'ILL', name: 'Ill', marketCap: 1e8, floatCap: 1e8 } });
+    check('流动性不足被降级且给出说明', mIll.grade !== 'A' && !!mIll.liquidityNote, `${mIll.grade} 级 · ${(mIll.liquidityNote || '').slice(0, 24)}`);
+
+    const ranked = MOON.rank([{ bars: hot, quote: { code: 'HOT', marketCap: 2e9 }, symbol: 'HOT' }, { bars: dull, quote: { code: 'DUL', marketCap: 5e11 }, symbol: 'DUL' }], {});
+    check('排名输出分布统计与警告', ranked.total === 2 && !!ranked.distribution && ranked.warning.includes('不是「预测」'));
+  }
+
+  // 26) v1.1.0 预设策略
+  console.log('\n--- 预设策略（screener.PRESETS） ---');
+  {
+    check('预设策略 ≥ 13 个', Screener.PRESETS.length >= 13, `${Screener.PRESETS.length} 个`);
+    check('每个预设都有交易逻辑说明', Screener.PRESETS.every((p) => p.rationale && p.rationale.length > 10));
+    check('每个预设都写明了最大风险（watchOut）', Screener.PRESETS.every((p) => p.watchOut && p.watchOut.length > 5));
+    check('预设引用的因子都真实存在', Screener.PRESETS.every((p) => (p.filters || []).every((f) => !!Screener.FACTOR_MAP[f.factor])));
+    check('预设建议的池子都存在', Screener.PRESETS.every((p) => !!Screener.UNIVERSE_RAW[p.universe]));
+    check('综合分权重合计为 1', Math.abs(Object.values(Screener.COMPOSITE_WEIGHTS).reduce((a, b) => a + b, 0) - 1) < 1e-9);
+
+    const items = [
+      { symbol: 'A', composite: 80, scores: { momentum: 90, trend: 85, liquidity: 70, breakout: 88 }, pe: 20, marketCap: 1e10, raw: { avgAmount: 5e8 } },
+      { symbol: 'B', composite: 40, scores: { momentum: 30, trend: 25, liquidity: 20, breakout: 10 }, pe: 60, marketCap: 1e9, raw: { avgAmount: 1e6 } },
+    ];
+    const res = Screener.screen(items, { preset: 'breakout52w' });
+    check('预设筛选能命中且带回放风险提示', res.rows.length === 1 && res.rows[0].symbol === 'A' && !!res.preset.watchOut, res.summary);
+    check('被排除的标的给出具体原因', res.rejected.length === 1 && res.rejected[0].reasons.length > 0, (res.rejected[0] || {}).reasons?.join('；'));
+    const none = Screener.screen(items, {});
+    check('不传预设时不做过滤', none.rows.length === 2 && none.preset === null);
   }
 
   console.log(`\n===== 通过 ${pass} 项，失败 ${fail} 项 =====\n`);

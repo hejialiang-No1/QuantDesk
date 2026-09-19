@@ -20,6 +20,11 @@ const Options = require('../shared/options');
 const Market = require('../shared/market');
 const Alerts = require('../shared/alerts');
 const Screener = require('../shared/screener');
+// ---- v1.1.0：新闻 / 事件 / 风险机会 / 暴涨雷达
+const Newsfeed = require('../shared/newsfeed');
+const Events = require('../shared/events');
+const Insight = require('../shared/insight');
+const Moonshot = require('../shared/moonshot');
 const notify = require('./notify');
 
 const isDev = process.argv.includes('--dev');
@@ -329,13 +334,77 @@ function createWindow() {
                 factorLegend: n('#scanFactorLegend .fl-item'),
                 universeOptions: n('#scanUniverse option'),
                 btBenchOptions: n('#btBench option'),
+                // ---- v1.1.0 机会雷达
+                presetItems: n('#scanPresets .preset-item'),
+                radarNav: !!q('.nav-item[data-view="radar"]'),
+                radarView: !!q('#view-radar'),
+                radarUniverseOptions: n('#radarUniverse option'),
+                radarTableHead: n('#radarTable thead th'),
+                newsPanel: !!q('#radarNewsList'),
+                eventPanel: !!q('#radarEventList'),
+                // 下面几项不依赖 DOM，直接用加载进来的模块算一遍 ——
+                // 这样即使还没点过扫描，也能证明「模块在渲染层真的可用」，
+                // 而不是只挂了个空壳（v1.0.2 的教训）。
+                radarEvents: (function () {
+                  try {
+                    return (window.Events ? window.Events.upcoming({ days: 45 }).length : 0);
+                  } catch (e) {
+                    return -1;
+                  }
+                })(),
+                insightItems: (function () {
+                  try {
+                    if (!window.Insight) return 0;
+                    const bars = [];
+                    for (let i = 0; i < 150; i++) {
+                      const c = 100 * Math.pow(1.003, i);
+                      bars.push({ date: 'd' + i, open: c * 0.99, close: c, high: c * 1.01, low: c * 0.99, volume: 1e6, amount: c * 1e6 });
+                    }
+                    const r = window.Insight.analyze({ bars: bars, quote: { code: 'T', price: bars[149].close } });
+                    return (r.opportunities || []).length + (r.risks || []).length;
+                  } catch (e) {
+                    return -1;
+                  }
+                })(),
+                // 暴涨雷达：必须同时产出「等级」与「失效条件」，
+                // 缺任一者说明模块退化成了只会打分的黑箱
+                moonshotRows: (function () {
+                  try {
+                    if (!window.Moonshot) return 0;
+                    const bars = [];
+                    for (let i = 0; i < 200; i++) {
+                      const c = 50 * Math.pow(1.002, i) * (1 + 0.05 * Math.sin(i / 3));
+                      bars.push({ date: 'd' + i, open: c * 0.99, close: c, high: c * 1.02, low: c * 0.98, volume: 1e6, amount: c * 1e6 });
+                    }
+                    const s = window.Moonshot.score({ bars: bars, quote: { code: 'T', marketCap: 2e9, floatCap: 2e9 } });
+                    window.__moonshotProbe = s;
+                    return s ? 1 : 0;
+                  } catch (e) {
+                    return -1;
+                  }
+                })(),
+                moonshotInvalidation: (function () {
+                  try {
+                    const s = window.__moonshotProbe;
+                    return s && s.invalidation ? s.invalidation.length : 0;
+                  } catch (e) {
+                    return -1;
+                  }
+                })(),
+                newsfeedSentiment: (function () {
+                  try {
+                    return window.Newsfeed ? window.Newsfeed.sentiment('业绩超预期，上调目标价', '').score : 0;
+                  } catch (e) {
+                    return -999;
+                  }
+                })(),
               },
               // 渲染层内的“一次性往返”验证：用临时账户跑一遍撮合，不碰真实模拟盘、不联网。
               // 目的是证明模块在渲染层真的可用，而不是只挂了个空壳。
               v102Round: (function () {
                 const out = {};
                 // 本地加载的 9 个全局模块（contextBridge 代理不算，见 index.html 注释）
-                out.modules = ['Indicators', 'Market', 'Risk', 'Paper', 'Perf', 'Tax', 'Broker', 'Screener', 'Alerts']
+                out.modules = ['Indicators', 'Market', 'Risk', 'Paper', 'Perf', 'Tax', 'Broker', 'Screener', 'Alerts', 'Newsfeed', 'Events', 'Insight', 'Moonshot']
                   .filter((k) => typeof window[k] === 'object');
                 try {
                   // 必须用本地加载的 window.Paper：contextBridge 传过来的是跨世界函数代理，
@@ -464,10 +533,17 @@ function createWindow() {
             ['审计日志表存在', e2.auditRows >= 1],
             ['税务视图：无成交时给提示而非空白', e2.taxKpi >= 4 || e2.taxEmptyHint === true],
             ['报税表页签已渲染', e2.taxFormTabs >= 3],
-            ['选股因子图例已渲染', e2.factorLegend >= 6],
+            ['选股因子图例已渲染（16 因子）', e2.factorLegend >= 16],
             ['内置股票池下拉已填充', e2.universeOptions >= 6],
             ['回测基准下拉已填充', e2.btBenchOptions >= 3],
-            ['渲染层用到的本地模块都真的加载了', ['Market', 'Risk', 'Paper', 'Perf', 'Tax', 'Broker', 'Screener', 'Alerts', 'Indicators'].every((k) => rt.modules.indexOf(k) >= 0)],
+            ['渲染层用到的本地模块都真的加载了', ['Market', 'Risk', 'Paper', 'Perf', 'Tax', 'Broker', 'Screener', 'Alerts', 'Indicators', 'Newsfeed', 'Events', 'Insight', 'Moonshot'].every((k) => rt.modules.indexOf(k) >= 0)],
+            // ---- v1.1.0 机会雷达
+            ['预设策略按钮已渲染', e2.presetItems >= 13],
+            ['机会雷达导航项存在', e2.radarNav === true],
+            ['机会雷达视图存在', e2.radarView === true],
+            ['事件日历模块可产出事件', e2.radarEvents > 0],
+            ['风险机会引擎可产出结论', e2.insightItems > 0],
+            ['暴涨雷达给出等级与失效条件', e2.moonshotRows > 0 && e2.moonshotInvalidation > 0],
             ['模拟盘撮合往返：受理', rt.orderOk === true && rt.status === 'submitted'],
             ['模拟盘撮合往返：成交落账', rt.fills === 1 && rt.positions === 1 && rt.cashBelow === true && rt.feePositive === true],
             ['模拟盘上线就绪度清单 7 项且结论明确', rt.readyTotal === 7 && rt.readyItems === 7 && /\d\/7/.test(String(rt.ready)) && rt.readyVerdict.length > 4],
@@ -656,6 +732,7 @@ async function runScan(options = {}) {
   if (scanRunning) return { error: '扫描任务正在运行中' };
   scanRunning = true;
   const t0 = Date.now();
+  let payloadBenchmark = null;
   try {
     const { source = 'pool', limit = 80, minPrice = 3, minAmount = 0, universe = '' } = options;
 
@@ -726,6 +803,8 @@ async function runScan(options = {}) {
                 name: t.name || k.name,
                 group: t.group || '',
                 ...a,
+                // v1.1.0：保留 K 线用于算多因子分，算完就删（不要回传给渲染层，太大）
+                _bars: k.bars,
               });
             }
           }
@@ -762,12 +841,57 @@ async function runScan(options = {}) {
       /* 行情补充失败忽略 */
     }
 
+    // 3.5) v1.1.0：多因子得分
+    // 放在行情补充之后，因为「价值/规模/流动性」三个因子依赖 PE、市值与成交额。
+    // 全部算完后做一次横截面重算（规模分位必须放在池子里比才有意义），再删掉 K 线。
+    try {
+      const bench = await fetchBenchmark();
+      const facItems = [];
+      for (const r of results) {
+        if (!r._bars) continue;
+        try {
+          const f = Screener.computeFactors({
+            bars: r._bars,
+            quote: {
+              code: r.code, name: r.name,
+              marketCap: r.marketCap, floatCap: r.floatCap,
+              pe: r.pe, pb: r.pb, changePct: r.changePct, amount: r.amount,
+            },
+            symbol: r.code,
+            benchmark: bench,
+            ppy: 252,
+          });
+          if (f) {
+            r.factor = f;
+            facItems.push(f);
+          }
+        } catch {
+          /* 单只因子失败不影响整表 */
+        }
+      }
+      if (facItems.length) {
+        const cs = Screener.scoreUniverse(facItems, { sort: 'composite' });
+        const csMap = new Map(cs.map((x) => [x.symbol, x]));
+        for (const r of results) {
+          if (!r.factor) continue;
+          const c = csMap.get(r.factor.symbol);
+          if (c) r.factor = { ...r.factor, scores: c.scores, composite: c.composite, sizePercentile: c.sizePercentile };
+        }
+      }
+      payloadBenchmark = bench;
+    } catch {
+      /* 因子层整体失败时，界面上的预设策略会提示「缺因子数据」，不影响原有评分 */
+    }
+    for (const r of results) delete r._bars;
+
     results.sort((a, b) => b.score - a.score);
     const payload = {
       results,
       scannedAt: Date.now(),
       costMs: Date.now() - t0,
       source,
+      benchmark: payloadBenchmark,
+      hasFactors: results.some((r) => !!r.factor),
     };
     store.set('scanResults', payload);
     store.set('lastScanAt', payload.scannedAt);
@@ -775,6 +899,467 @@ async function runScan(options = {}) {
   } finally {
     scanRunning = false;
   }
+}
+
+// ---------------------------------------------------------------- 机会雷达（v1.1.0）
+//
+// 一次「机会雷达」扫描 = 行情 + 因子 + 风险机会 + 新闻 + 未来事件 + 暴涨潜力分。
+// 设计上刻意分成两趟：
+//   第 1 趟只用 K 线（快、必成功），算出因子与暴涨潜力，用于**选出 Top N**；
+//   第 2 趟只对 Top N 去抓新闻 / 财报日 / 空头 / 分析师（慢、可能失败），
+//   然后把完整上下文重新喂给 insight，产出最终的风险点与机会点。
+// 这样做的原因：新闻与日历接口有速率限制，对全池抓会又慢又容易被打断；
+// 而「哪些标的值得深挖」这一步用不依赖它们的价格因子就够了。
+
+const radarState = { running: false, last: null };
+
+/** 代码 → 中文名（东财以中文报道为主，用中文名搜命中率高得多） */
+const NAME_MAP = {};
+for (const p of POOL) if (p && p.code) NAME_MAP[String(p.code).toUpperCase()] = p.name || '';
+
+/**
+ * 抓某只标的的新闻并做**相关性过滤**。
+ * 东财搜索是全文检索，搜代码会混进大量泛市场新闻（搜 PLTR 能返回「智谱AI概念」），
+ * 不过滤的话个股情绪分会变成大盘情绪分的复读机。
+ * 策略：优先「标题必须命中代码/公司名」的严格口径，命中不足 2 条才放宽到正文。
+ */
+function newsForSymbol(nb, sym, name) {
+  const aliases = [NAME_MAP[sym]].filter(Boolean);
+  const rows = [];
+  for (const key of [sym, name, ...aliases].filter(Boolean)) {
+    const got = nb.perKeyword[key];
+    if (got) for (const r of got) rows.push({ ...r, symbol: sym });
+  }
+  const parsed = Newsfeed.fromEastmoney(rows, sym);
+  const keys = [sym, name, ...aliases].filter(Boolean);
+  const target = { symbol: sym, name, aliases };
+  const strict = Newsfeed.relevant(parsed, target, { strict: true });
+  const loose = Newsfeed.relevant(parsed, target);
+  // 严格口径只要命中就用它；一条都没有时才放宽到「正文命中」。
+  const used = strict.length >= 1 ? strict : loose;
+  // keysOf：让 newsfeed 能定位到「提到这只票的那句话」，做句子级情绪打分
+  return { items: Newsfeed.score(used, { keysOf: () => keys }), rawCount: parsed.length, keptCount: used.length };
+}
+
+/**
+ * 取基准。
+ * 用 SPY（标普 500 ETF）而不是 100.SPX —— 指数代码在部分数据源上没有日线，
+ * 而 ETF 的日线在所有源上都稳定可得，两者走势几乎一致，做相对强度足够。
+ * 兜底顺序：SPY → QQQ → 100.SPX。
+ */
+async function fetchBenchmark() {
+  const tries = [
+    { secid: '105.SPY', code: 'SPY', label: '标普500ETF' },
+    { secid: '105.QQQ', code: 'QQQ', label: '纳指100ETF' },
+    { secid: '100.SPX', code: 'SPX', label: '标普500指数' },
+  ];
+  for (const t of tries) {
+    try {
+      const k = await ds.kline(t.secid, { period: 'day', limit: 160, fq: 1 });
+      const c = (k.bars || []).map((b) => b.close);
+      if (c.length < 61) continue;
+      const last = c[c.length - 1];
+      return {
+        code: t.code, label: t.label, secid: t.secid,
+        ret20: (last / c[c.length - 21] - 1) * 100,
+        ret60: (last / c[c.length - 61] - 1) * 100,
+        price: last,
+        asOf: k.bars[k.bars.length - 1].date,
+        src: k.src,
+      };
+    } catch {
+      /* 试下一个 */
+    }
+  }
+  return null;
+}
+
+/** 简易并发池（主进程里多处要用，不再单独抽文件） */
+async function poolRun(items, concurrency, fn) {
+  const out = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      try {
+        out[i] = await fn(items[i], i);
+      } catch {
+        out[i] = null;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, items.length)) }, worker));
+  return out;
+}
+
+/**
+ * @param {Object} options {
+ *   universe, limit, includeNews, includeEvents, includeExtras,
+ *   newsTop, extrasTop, eventDays, minAmount, secids
+ * }
+ */
+async function runRadar(options = {}) {
+  if (radarState.running) return { error: '机会雷达扫描正在运行中' };
+  radarState.running = true;
+  const t0 = Date.now();
+  const progress = (stage, done, total, current) => {
+    if (mainWindow && mainWindow.webContents) {
+      mainWindow.webContents.send('radar:progress', { stage, done, total, current });
+    }
+  };
+  try {
+    const o = options || {};
+    const universe = o.universe || 'highbeta';
+    const limit = Math.max(5, Math.min(120, Number(o.limit) || 30));
+    const includeNews = o.includeNews !== false;
+    const includeEvents = o.includeEvents !== false;
+    const includeExtras = o.includeExtras !== false;
+    const newsTop = Math.max(0, Math.min(40, Number(o.newsTop) || 12));
+    const extrasTop = Math.max(0, Math.min(40, Number(o.extrasTop) || 12));
+    const eventDays = Math.max(7, Math.min(90, Number(o.eventDays) || 30));
+    const minAmount = Number(o.minAmount) || 0;
+
+    // 1) 候选池
+    let candidates = [];
+    if (Array.isArray(o.secids) && o.secids.length) {
+      candidates = o.secids.map((s) => (typeof s === 'string' ? { secid: s, code: ds.num ? String(s).split('.').slice(1).join('.') : s } : s));
+    } else if (universe === 'watch') {
+      candidates = store.get('watchlist').map((w) => ({ ...w }));
+    } else {
+      const us = Screener.universes(store.get('watchlist').map((w) => w.code));
+      const u = us[universe];
+      if (!u) return { error: `未知股票池：${universe}` };
+      candidates = u.codes.map((code) => ({
+        secid: `105.${code}`,
+        altSecid: `106.${code}`,
+        code,
+        name: '',
+        group: u.label,
+      }));
+    }
+    if (!candidates.length) return { error: '候选池为空' };
+    // 池子可以做样本上限截断，避免一次扫描几百只
+    if (candidates.length > limit * 2) candidates = candidates.slice(0, limit * 2);
+
+    // 2) 基准
+    const benchmark = await fetchBenchmark();
+    progress('基准', 0, 1, benchmark ? '标普500 已就绪' : '基准不可用');
+
+    // 3) 第 1 趟：K 线 + 因子
+    let done = 0;
+    const first = await poolRun(candidates, 3, async (t) => {
+      let k = null;
+      try {
+        k = await ds.kline(t.secid, { period: 'day', limit: 260, fq: 1 });
+      } catch {
+        k = null;
+      }
+      if ((!k || !k.bars || k.bars.length < 60) && t.altSecid) {
+        try {
+          const k2 = await ds.kline(t.altSecid, { period: 'day', limit: 260, fq: 1 });
+          if (k2 && k2.bars && k2.bars.length >= 60) {
+            k = k2;
+            t.secid = t.altSecid;
+          }
+        } catch {
+          /* 备用市场号也失败，放弃这一只 */
+        }
+      }
+      done++;
+      progress('行情', done, candidates.length, t.code);
+      if (!k || !k.bars || k.bars.length < 60) return null;
+      return { t, k };
+    });
+
+    const valid = first.filter(Boolean);
+    if (!valid.length) return { error: '没有取到足够的K线数据（可能数据源整体不可达）' };
+
+    // 4) 补行情（市值 / PE 对因子与估值判断必要）
+    try {
+      const qt = await ds.quotes(valid.map((v) => v.t.secid), { maxAge: 120000, concurrency: 3 });
+      const qmap = new Map(qt.map((q) => [q.secid, q]));
+      for (const v of valid) v.quote = qmap.get(v.t.secid) || null;
+    } catch {
+      /* 行情补充失败不阻塞：因子里的 PE/市值会走缺失分支 */
+    }
+
+    // 5) 因子 + 暴涨潜力
+    const scored = valid.map(({ t, k, quote }) => {
+      const q = quote || { code: t.code || k.code, name: t.name || k.name };
+      const f = Screener.computeFactors({ bars: k.bars, quote: q, symbol: t.code || k.code, benchmark, ppy: 252 });
+      const m = Moonshot.score({ bars: k.bars, quote: q, symbol: t.code || k.code, benchmark, ppy: 252 });
+      return { t, k, quote: q, factors: f, moonshot: m };
+    }).filter((x) => x.factors);
+
+    if (!scored.length) return { error: '因子计算全部失败（K线长度不足 60 根）' };
+
+    // 横截面重算规模分位
+    const crossSection = Screener.scoreUniverse(scored.map((x) => x.factors), { sort: 'composite' });
+    const csMap = new Map(crossSection.map((x) => [x.symbol, x]));
+    for (const x of scored) {
+      const cs = csMap.get(x.factors.symbol);
+      if (cs) x.factors = { ...x.factors, scores: cs.scores, composite: cs.composite, sizePercentile: cs.sizePercentile };
+    }
+
+    // 按暴涨潜力分排序（雷达的核心排序口径），同时保留综合因子分
+    scored.sort((a, b) => (b.moonshot ? b.moonshot.score : 0) - (a.moonshot ? a.moonshot.score : 0));
+    // 成交额门槛过滤
+    const passed = minAmount > 0
+      ? scored.filter((x) => ((x.factors.raw || {}).avgAmount || 0) >= minAmount)
+      : scored;
+    const tops = passed.slice(0, Math.max(limit, newsTop, extrasTop));
+
+    // 6) 未来事件（全场一次，日历是按天查的，必须限流）
+    let events = [];
+    let eventSummary = null;
+    if (includeEvents) {
+      progress('事件日历', 0, 1, '拉取财报排期…');
+      try {
+        const bundle = await ds.calendarBundle({
+          days: eventDays,
+          include: ['earnings'],
+        });
+        events = Events.upcoming({
+          days: eventDays,
+          earnings: bundle.earnings,
+          focusSymbols: tops.map((x) => String(x.factors.symbol).toUpperCase()),
+        });
+        eventSummary = {
+          fetchedDates: bundle.fetchedDates,
+          earningsTotal: (bundle.earnings || []).length,
+          errors: bundle.errors,
+        };
+      } catch (e) {
+        eventSummary = { error: e.message };
+      }
+    }
+
+    // 7) 新闻（只对 Top N）
+    let newsMap = new Map();
+    let newsSummaryMeta = null;
+    if (includeNews && newsTop > 0) {
+      const targets = tops.slice(0, newsTop);
+      // 关键词用「代码 + 中文名」，中文名命中率显著更高（东财以中文报道为主）
+      const kws = [];
+      for (const x of targets) {
+        kws.push(String(x.factors.symbol));
+        if (x.quote && x.quote.name && x.quote.name !== x.factors.symbol) kws.push(x.quote.name);
+      }
+      progress('新闻', 0, kws.length, '抓取新闻…');
+      try {
+        const nb = await ds.newsBundle(kws, { limit: 10, concurrency: 2 });
+        let raw = 0;
+        let kept = 0;
+        for (const x of targets) {
+          const sym = String(x.factors.symbol).toUpperCase();
+          const name = x.quote && x.quote.name ? x.quote.name : '';
+          const r = newsForSymbol(nb, sym, name);
+          newsMap.set(sym, r.items);
+          raw += r.rawCount;
+          kept += r.keptCount;
+        }
+        newsSummaryMeta = { errors: nb.errors, keywords: kws.length, rawHits: raw, afterRelevance: kept };
+      } catch (e) {
+        newsSummaryMeta = { error: e.message };
+      }
+    }
+
+    // 8) 空头 + 分析师（只对 Top N）
+    const extrasMap = new Map();
+    if (includeExtras && extrasTop > 0) {
+      const targets = tops.slice(0, extrasTop);
+      progress('空头与分析师', 0, targets.length, '拉取增强数据…');
+      await poolRun(targets, 2, async (x) => {
+        const sym = String(x.factors.symbol).toUpperCase();
+        const ex = await ds.fundamentalExtras(sym);
+        if (ex) extrasMap.set(sym, ex);
+      });
+    }
+
+    // 9) 第 2 趟：带完整上下文的 insight（逐条可回溯）
+    const rows = tops.map((x) => {
+      const sym = String(x.factors.symbol).toUpperCase();
+      const news = newsMap.get(sym) || [];
+      const newsSummary = news.length ? Newsfeed.summarize(news) : null;
+      const ex = extrasMap.get(sym) || {};
+      const dte = Events.daysToEarnings(sym, events, undefined) ||
+        (() => {
+          // 日历里没有排期时，至少给「财报季窗口」这一层信息
+          return null;
+        })();
+      const companyEvents = events.filter((e) => e.symbol === sym);
+      const evRisk = Events.riskProfile(
+        [...companyEvents, ...events.filter((e) => e.scope === 'market')],
+        { symbol: sym }
+      );
+      const ins = Insight.analyze({
+        bars: x.k.bars,
+        quote: x.quote,
+        factors: x.factors,
+        newsSummary,
+        eventRisk: evRisk,
+        daysToEarnings: dte,
+        shortInterest: ex.shortInterest || null,
+        analyst: ex.analyst || null,
+        benchmark,
+        ppy: 252,
+      });
+      // 第二趟重算暴涨潜力分：第一趟只有价格，催化维度拿不到新闻/财报/分析师，
+      // 会一律落到中位分 —— 等于把 6% 的权重变成常数。
+      const m2 = Moonshot.score({
+        bars: x.k.bars, quote: x.quote, symbol: sym, benchmark, ppy: 252,
+        newsSummary, daysToEarnings: dte,
+        shortInterest: ex.shortInterest || null, analyst: ex.analyst || null,
+      });
+      return {
+        secid: x.t.secid,
+        symbol: sym,
+        name: x.factors.name || x.quote.name || sym,
+        group: x.t.group || '',
+        price: x.factors.price,
+        changePct: x.factors.changePct,
+        pe: x.factors.pe,
+        marketCap: x.factors.marketCap,
+        factorComposite: x.factors.composite,
+        scores: x.factors.scores,
+        raw: x.factors.raw,
+        moonshot: m2 || x.moonshot,
+        insight: ins,
+        news,
+        newsSummary,
+        daysToEarnings: dte,
+        events: companyEvents,
+        shortInterest: ex.shortInterest || null,
+        analyst: ex.analyst || null,
+        extrasErrors: ex.errors || null,
+        bars: x.k.bars.length,
+      };
+    });
+    // 用重算后的分数重排（第一趟的排序基于不完整上下文）
+    rows.sort((a, b) => (b.moonshot ? b.moonshot.score : 0) - (a.moonshot ? a.moonshot.score : 0));
+
+    // 10) 组合级汇总
+    const poolMoonshot = Moonshot.rank(
+      tops.map((x) => ({
+        bars: x.k.bars, quote: x.quote, symbol: x.factors.symbol,
+        benchmark, ppy: 252,
+      })),
+      { topN: tops.length }
+    );
+
+    // 宏观事件窗口固定至少 45 天：只有 7~8 天的话经常「一条都没有」，
+    // 看起来像功能失效，实际上是窗口太窄（宏观数据发布密度约每周 1-2 次）。
+    const marketEvents = Events.upcoming({ days: Math.max(45, Math.min(eventDays, 120)) });
+    const marketRisk = Events.riskProfile(marketEvents.filter((e) => e.scope === 'market'));
+
+    const allNews = [];
+    for (const [, list] of newsMap) allNews.push(...list);
+    const overallNews = Newsfeed.summarize(Newsfeed.score(allNews));
+
+    // 机会股：暴涨潜力分高 + 风险调整净分为正
+    const opportunities = rows
+      .filter((r) => r.moonshot && r.moonshot.grade !== 'D')
+      .map((r) => ({
+        symbol: r.symbol, name: r.name, price: r.price, changePct: r.changePct,
+        grade: r.moonshot.grade, moonshotScore: r.moonshot.score,
+        opportunity: r.insight && r.insight.scores ? r.insight.scores.opportunity : null,
+        risk: r.insight && r.insight.scores ? r.insight.scores.risk : null,
+        netAdjusted: r.insight && r.insight.scores ? r.insight.scores.netAdjusted : null,
+        stance: r.insight && r.insight.stance ? r.insight.stance.label : '',
+        topTriggers: (r.moonshot.triggers || []).slice(0, 2),
+        topRisks: (r.insight.risks || []).slice(0, 3).map((x) => x.label),
+      }))
+      .sort((a, b) => (b.netAdjusted || 0) - (a.netAdjusted || 0));
+
+    const payload = {
+      rows,
+      opportunities,
+      benchmark,
+      universe,
+      events,
+      marketEvents: marketEvents.slice(0, 30),
+      marketRisk,
+      eventSummary,
+      newsSummaryMeta,
+      overallNews,
+      poolMoonshot: {
+        total: poolMoonshot.total,
+        distribution: poolMoonshot.distribution,
+        summary: poolMoonshot.summary,
+        warning: poolMoonshot.warning,
+      },
+      scannedAt: Date.now(),
+      costMs: Date.now() - t0,
+      sources: ds.activeSource(),
+      degraded: {
+        news: newsMap.size === 0,
+        events: events.length === 0,
+        extras: extrasMap.size === 0,
+      },
+      disclaimer:
+        '本页所有结论均由公开行情、成交量与新闻按固定规则计算得出，用于缩小研究范围，不构成投资建议。' +
+        '新闻情绪为关键词规则分（非模型判断），事件日期可能被官方调整，请以原始来源为准。',
+    };
+    radarState.last = payload;
+    store.set('radarLast', payload);
+    return payload;
+  } finally {
+    radarState.running = false;
+  }
+}
+
+/** 单独取「未来事件日历」（不跑扫描，供界面事件面板用） */
+async function fetchEventCalendar(options = {}) {
+  const o = options || {};
+  const days = Math.max(7, Math.min(120, Number(o.days) || 45));
+  const focus = (o.symbols || []).map((s) => String(s).toUpperCase());
+  let earnings = [];
+  let errors = {};
+  if (o.includeEarnings !== false) {
+    try {
+      const b = await ds.calendarBundle({ days, include: ['earnings'] });
+      earnings = b.earnings || [];
+      errors = b.errors || {};
+    } catch (e) {
+      errors.earnings = e.message;
+    }
+  }
+  let dividends = [];
+  let splits = [];
+  if (o.includeCorp) {
+    try {
+      const b = await ds.calendarBundle({ days: Math.min(days, 30), include: ['dividends', 'splits'] });
+      dividends = b.dividends || [];
+      splits = b.splits || [];
+    } catch (e) {
+      errors.corp = e.message;
+    }
+  }
+  const events = Events.upcoming({
+    days,
+    earnings,
+    dividends,
+    splits,
+    focusSymbols: focus,
+  });
+  return {
+    events,
+    marketEvents: Events.upcoming({ days }).filter((e) => e.scope === 'market'),
+    risk: Events.riskProfile(events),
+    counts: { earnings: earnings.length, dividends: dividends.length, splits: splits.length },
+    errors,
+    days,
+    generatedAt: Date.now(),
+  };
+}
+
+/** 抓新闻并打分（独立入口，供新闻面板刷新） */
+async function fetchNews(keywords, options = {}) {
+  const kws = (Array.isArray(keywords) ? keywords : [keywords]).filter(Boolean);
+  if (!kws.length) return { items: [], summary: null, errors: {} };
+  const nb = await ds.newsBundle(kws, { limit: (options && options.limit) || 12, concurrency: 2 });
+  const items = Newsfeed.score(Newsfeed.fromEastmoney(nb.items, null));
+  return { items, summary: Newsfeed.summarize(items), perKeyword: nb.perKeyword, errors: nb.errors };
 }
 
 // ---------------------------------------------------------------- 监控轮询（v1.0.2）
@@ -1092,6 +1677,23 @@ function registerIpc() {
 
   ipcMain.handle('scan:run', (_, opt) => runScan(opt || {}));
   ipcMain.handle('scan:last', () => store.get('scanResults'));
+
+  // ---- v1.1.0：机会雷达 / 新闻 / 事件日历
+  ipcMain.handle('radar:run', (_, opt) => runRadar(opt || {}));
+  ipcMain.handle('radar:last', () => store.get('radarLast'));
+  ipcMain.handle('news:fetch', (_, kws, opt) => fetchNews(kws, opt || {}));
+  ipcMain.handle('events:fetch', (_, opt) => fetchEventCalendar(opt || {}));
+  ipcMain.handle('events:macro', () => ({
+    items: Events.upcoming({ days: 120 }),
+    risk: Events.riskProfile(Events.upcoming({ days: 120 }).filter((e) => e.scope === 'market')),
+  }));
+  ipcMain.handle('extras:fetch', async (_, symbol) => {
+    try {
+      return await ds.fundamentalExtras(symbol);
+    } catch (e) {
+      return { symbol: String(symbol).toUpperCase(), error: e.message };
+    }
+  });
 
   ipcMain.handle('store:get', (_, key) => store.get(key));
   ipcMain.handle('store:set', (_, key, val) => store.set(key, val));

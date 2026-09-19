@@ -1446,3 +1446,232 @@ canvas.equity { height: 240px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
 }
+
+/* ============================================================================
+   v1.1.0 —— 机会雷达 / 预设策略 / 新闻与事件
+   ----------------------------------------------------------------------------
+   设计原则：结论与证据必须同屏。
+   所以每一条机会/风险点都带可展开的「依据」，新闻每条都能看到命中的关键词 ——
+   用户要能自己复核，而不是只能相信一个分数。
+   ========================================================================= */
+
+/* ---------------------------------------------------------------- 预设策略 */
+
+.preset-bar { margin-top: 14px; }
+.preset-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 9px; }
+.preset-head .ph-t { font-size: 12px; font-weight: 600; color: var(--text-2); letter-spacing: -0.1px; }
+.preset-head .ph-d { font-size: 11px; color: var(--text-4); }
+.preset-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.preset-item {
+  padding: 5px 11px; border-radius: var(--r-cap); font-size: 11.5px; font-weight: 500;
+  background: var(--glass-card); box-shadow: var(--hi-top), var(--hair);
+  color: var(--text-2); cursor: pointer; user-select: none;
+  transition: background var(--fast), color var(--fast), box-shadow var(--fast);
+}
+.preset-item:hover { background: var(--glass-raise); color: var(--text); }
+.preset-item.on {
+  background: rgba(10, 132, 255, 0.20); color: #6cb2ff;
+  box-shadow: var(--hi-top), inset 0 0 0 0.5px rgba(10, 132, 255, 0.45);
+}
+[data-theme="light"] .preset-item.on { color: #003d84; }
+.preset-item .pn { font-family: var(--mono); font-size: 10px; color: var(--text-4); margin-left: 5px; }
+.preset-detail {
+  margin-top: 10px; padding: 11px 13px; border-radius: var(--r-m);
+  background: var(--glass-sunken); box-shadow: var(--hair);
+  font-size: 11.5px; line-height: 1.65; color: var(--text-3); display: none;
+}
+.preset-detail.show { display: block; }
+.preset-detail .pd-row { display: flex; gap: 8px; margin-bottom: 5px; }
+.preset-detail .pd-row:last-child { margin-bottom: 0; }
+.preset-detail .pd-k {
+  flex: 0 0 62px; color: var(--text-4); font-size: 11px;
+}
+.preset-detail .pd-v { flex: 1; min-width: 0; color: var(--text-2); }
+.preset-detail .pd-v.warn { color: var(--orange); }
+.preset-detail .pd-v b { color: var(--text); font-weight: 600; }
+.preset-detail code {
+  font-family: var(--mono); font-size: 10.5px; padding: 1px 5px; border-radius: var(--r-xs);
+  background: var(--glass-card); color: var(--accent);
+}
+
+/* 筛选摘要条（结果表上方） */
+.screen-summary {
+  padding: 9px 14px; font-size: 11.5px; color: var(--text-3);
+  background: rgba(10, 132, 255, 0.07); box-shadow: inset 0 -0.5px 0 var(--sep);
+  line-height: 1.6;
+}
+.screen-summary b { color: var(--text-2); }
+
+/* ---------------------------------------------------------------- 雷达控制区 */
+
+.radar-opts { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 12px; align-items: center; }
+.radar-opts label.fld.inline { color: var(--text-2); font-size: 11.5px; cursor: pointer; }
+.radar-opts label.fld.inline input[type="checkbox"] {
+  width: 14px; height: 14px; accent-color: var(--accent); cursor: pointer; margin: 0;
+}
+.radar-opts label.fld.inline span { color: var(--text-3); }
+
+.kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; }
+.radar-opts + .row + .kpi-grid { margin-top: 14px; }
+
+/* ---------------------------------------------------------------- 等级徽章 */
+
+.grade {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: var(--r-s);
+  font-family: var(--mono); font-size: 12px; font-weight: 700;
+}
+.grade.A { background: rgba(255, 69, 58, 0.22); color: #ff8a94; box-shadow: inset 0 0 0 0.5px rgba(255, 69, 58, 0.5); }
+.grade.B { background: rgba(255, 159, 10, 0.20); color: #ffbf5c; box-shadow: inset 0 0 0 0.5px rgba(255, 159, 10, 0.46); }
+.grade.C { background: var(--glass-card); color: var(--text-3); }
+.grade.D { background: var(--glass-sunken); color: var(--text-4); }
+[data-theme="light"] .grade.A { color: #a3000f; }
+[data-theme="light"] .grade.B { color: #8c4a00; }
+
+/* 因子迷你条 */
+.mini { display: flex; align-items: center; gap: 6px; min-width: 76px; }
+.mini .mt { flex: 1; height: 5px; border-radius: var(--r-cap); background: var(--glass-sunken); overflow: hidden; min-width: 34px; }
+.mini .mf { height: 100%; border-radius: var(--r-cap); }
+.mini .mv { font-family: var(--mono); font-size: 10.5px; color: var(--text-3); width: 22px; text-align: right; }
+.mf.lv1 { background: var(--green); }
+.mf.lv2 { background: #6fbf4a; }
+.mf.lv3 { background: var(--yellow); }
+.mf.lv4 { background: var(--orange); }
+.mf.lv5 { background: var(--red); }
+
+/* ---------------------------------------------------------------- 风险 / 机会点 */
+
+.insight-head {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  padding: 12px 14px; border-radius: var(--r-m);
+  background: var(--glass-sunken); box-shadow: var(--hair); margin-bottom: 14px;
+}
+.insight-head .ih-sym { font-family: var(--mono); font-size: 15px; font-weight: 700; letter-spacing: -0.2px; }
+.insight-head .ih-name { font-size: 12px; color: var(--text-2); }
+.insight-head .ih-spacer { flex: 1; min-width: 0; }
+.insight-head .ih-score {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  padding: 5px 12px; border-radius: var(--r-s); background: var(--glass-card);
+}
+.insight-head .ih-score .k { font-size: 10px; color: var(--text-4); }
+.insight-head .ih-score .v { font-family: var(--mono); font-size: 14px; font-weight: 700; }
+.insight-head .ih-note { width: 100%; font-size: 11.5px; color: var(--text-3); line-height: 1.65; margin-top: 4px; }
+
+.ins-col-title {
+  display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600;
+  margin-bottom: 10px; padding-bottom: 8px; box-shadow: inset 0 -0.5px 0 var(--sep);
+}
+.ins-col-title.up-t { color: var(--up); }
+.ins-col-title.dn-t { color: var(--down); }
+.ins-col-title .cnt {
+  font-family: var(--mono); font-size: 10.5px; font-weight: 600; padding: 1px 7px;
+  border-radius: var(--r-cap); background: var(--glass-card); color: var(--text-3);
+}
+.ins-list { display: flex; flex-direction: column; gap: 8px; }
+.ins-item {
+  border-radius: var(--r-m); background: var(--glass-card); box-shadow: var(--hi-top), var(--hair);
+  overflow: hidden;
+}
+.ins-item > .ii-hd {
+  display: flex; align-items: center; gap: 9px; padding: 9px 12px; cursor: pointer;
+  transition: background var(--fast);
+}
+.ins-item > .ii-hd:hover { background: var(--glass-raise); }
+.ins-item .ii-label { flex: 1; font-size: 12px; font-weight: 600; color: var(--text); min-width: 0; }
+.ins-item .ii-bar { width: 56px; height: 5px; border-radius: var(--r-cap); background: var(--glass-sunken); overflow: hidden; }
+.ins-item .ii-bar i { display: block; height: 100%; border-radius: var(--r-cap); }
+.ins-item.opp .ii-bar i { background: var(--up); }
+.ins-item.rsk .ii-bar i { background: var(--down); }
+.ins-item .ii-num { font-family: var(--mono); font-size: 11px; font-weight: 600; width: 26px; text-align: right; }
+.ins-item.opp .ii-num { color: var(--up); }
+.ins-item.rsk .ii-num { color: var(--down); }
+.ins-item .ii-caret {
+  width: 12px; color: var(--text-4); font-size: 10px; transition: transform var(--fast);
+}
+.ins-item.open .ii-caret { transform: rotate(90deg); }
+.ins-item .ii-bd {
+  display: none; padding: 0 12px 11px; font-size: 11.5px; line-height: 1.7; color: var(--text-3);
+}
+.ins-item.open .ii-bd { display: block; }
+.ins-item .ii-bd .ev {
+  font-family: var(--mono); font-size: 11px; color: var(--accent);
+  background: var(--glass-sunken); padding: 5px 8px; border-radius: var(--r-xs);
+  margin-bottom: 7px; display: block; word-break: break-word;
+}
+.ins-item .ii-bd .why { color: var(--text-3); }
+
+.insight-foot {
+  margin-top: 14px; padding: 10px 13px; border-radius: var(--r-m);
+  background: var(--glass-sunken); box-shadow: var(--hair);
+  font-size: 11px; line-height: 1.7; color: var(--text-4);
+}
+
+/* ---------------------------------------------------------------- 新闻 */
+
+.radar-two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1080px) { .radar-two { grid-template-columns: minmax(0, 1fr); } }
+
+.news-summary {
+  font-size: 11.5px; line-height: 1.7; color: var(--text-3);
+  padding: 10px 12px; border-radius: var(--r-m); background: var(--glass-sunken);
+  box-shadow: var(--hair); margin-bottom: 12px;
+}
+.news-summary .mood { font-weight: 600; }
+.news-summary .mood.pos { color: var(--up); }
+.news-summary .mood.neg { color: var(--down); }
+
+.news-list { display: flex; flex-direction: column; max-height: 520px; overflow-y: auto; }
+.news-item {
+  padding: 9px 2px; box-shadow: inset 0 -0.5px 0 var(--sep);
+  display: flex; gap: 10px; align-items: flex-start;
+}
+.news-item:last-child { box-shadow: none; }
+.news-item .ni-side { flex: 0 0 38px; text-align: center; padding-top: 1px; }
+.news-item .ni-senti {
+  font-family: var(--mono); font-size: 11.5px; font-weight: 700;
+  display: block;
+}
+.news-item .ni-senti.pos { color: var(--up); }
+.news-item .ni-senti.neg { color: var(--down); }
+.news-item .ni-senti.neu { color: var(--text-4); }
+.news-item .ni-age { font-size: 9.5px; color: var(--text-4); display: block; margin-top: 2px; }
+.news-item .ni-main { flex: 1; min-width: 0; }
+.news-item .ni-title {
+  font-size: 12px; line-height: 1.5; color: var(--text); cursor: pointer;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.news-item .ni-title:hover { color: var(--accent); }
+.news-item .ni-meta { margin-top: 4px; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+.news-item .ni-excerpt {
+  margin-top: 5px; font-size: 11px; line-height: 1.6; color: var(--text-4);
+  padding-left: 8px; border-left: 2px solid var(--sep-strong);
+}
+.news-item .ni-keys { font-family: var(--mono); font-size: 10px; color: var(--accent); }
+
+/* ---------------------------------------------------------------- 事件日历 */
+
+.event-list { display: flex; flex-direction: column; max-height: 480px; overflow-y: auto; margin-top: 12px; }
+.event-item {
+  display: flex; align-items: center; gap: 10px; padding: 9px 2px;
+  box-shadow: inset 0 -0.5px 0 var(--sep);
+}
+.event-item:last-child { box-shadow: none; }
+.event-item .ei-date {
+  flex: 0 0 66px; font-family: var(--mono); font-size: 11px; color: var(--text-3);
+}
+.event-item .ei-days {
+  flex: 0 0 44px; font-family: var(--mono); font-size: 10.5px; color: var(--text-4); text-align: right;
+}
+.event-item .ei-days.soon { color: var(--orange); font-weight: 600; }
+.event-item .ei-main { flex: 1; min-width: 0; }
+.event-item .ei-title { font-size: 12px; color: var(--text); line-height: 1.45; }
+.event-item .ei-src { font-size: 10px; color: var(--text-4); margin-top: 2px; }
+.event-item .ei-src .est { color: var(--orange); }
+.event-item.macro .ei-title { color: var(--text); }
+.event-item.earnings .ei-title { color: var(--text); }
+.event-item.dividend .ei-title,
+.event-item.split .ei-title { color: var(--text-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .ins-item .ii-caret { transition: none; }
+}

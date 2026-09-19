@@ -8,8 +8,15 @@
 set -e
 
 APP_NAME="QuantDesk"
-VER="1.0.2"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 版本号从 package.json 读，**不要**在这里硬编码 ——
+# 硬编码会在发版时静默不一致：代码是 1.1.0，dmg 文件名和 Info.plist 还是 1.0.2，
+# 而且构建照常成功、不报任何错。这类「产物元数据漂移」只能靠不硬编码来根治。
+VER="${QD_VERSION:-$(node -e "process.stdout.write(require('$ROOT/package.json').version)" 2>/dev/null)}"
+if [ -z "$VER" ]; then
+  echo "!! 无法从 package.json 读取版本号，请检查 node 是否可用"
+  exit 1
+fi
 BUILD="$ROOT/build"
 SRC_APP="$ROOT/node_modules/electron/dist/Electron.app"
 

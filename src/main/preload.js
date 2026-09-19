@@ -23,6 +23,11 @@ const Paper = require('../shared/paper');
 const Broker = require('../shared/broker');
 const Screener = require('../shared/screener');
 const Alerts = require('../shared/alerts');
+// ---- v1.1.0：新闻 / 事件 / 风险机会 / 暴涨雷达（全部纯函数，可离线跑）
+const Newsfeed = require('../shared/newsfeed');
+const Events = require('../shared/events');
+const Insight = require('../shared/insight');
+const Moonshot = require('../shared/moonshot');
 
 const api = {
   // 应用
@@ -105,6 +110,26 @@ const api = {
   broker: Broker,
   screener: Screener,
   alerts: Alerts,
+
+  // ---- v1.1.0
+  // 机会雷达（一次扫描：行情+因子+风险机会+新闻+事件+暴涨潜力）
+  radarRun: (opt) => ipcRenderer.invoke('radar:run', opt || {}),
+  radarLast: () => ipcRenderer.invoke('radar:last'),
+  newsFetch: (kws, opt) => ipcRenderer.invoke('news:fetch', kws, opt || {}),
+  eventsFetch: (opt) => ipcRenderer.invoke('events:fetch', opt || {}),
+  eventsMacro: () => ipcRenderer.invoke('events:macro'),
+  extrasFetch: (symbol) => ipcRenderer.invoke('extras:fetch', symbol),
+  onRadarProgress: (cb) => {
+    const h = (_, p) => cb(p);
+    ipcRenderer.on('radar:progress', h);
+    return () => ipcRenderer.removeListener('radar:progress', h);
+  },
+
+  // 纯函数模块（渲染层直接调用，与主进程同一份实现）
+  newsfeed: Newsfeed,
+  events: Events,
+  insight: Insight,
+  moonshot: Moonshot,
 };
 
 contextBridge.exposeInMainWorld('qd', api);

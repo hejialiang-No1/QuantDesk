@@ -19,9 +19,11 @@ NODE_BIN="$(command -v node 2>/dev/null || ls -d /Users/hejialiang/.workbuddy/bi
 
 OWNER="hejialiang-No1"
 REPO="QuantDesk"
-TAG="v1.0.1"
-RELEASE_NAME="QuantDesk v1.0.1 —— 美股量化终端"
-DMG="build/QuantDesk-1.0.1-arm64.dmg"
+# 版本号与产物名全部从 package.json 推导，避免「代码发新版、Release 打旧包」
+VER="$("$NODE_BIN" -e "process.stdout.write(require('./package.json').version)")"
+TAG="v$VER"
+RELEASE_NAME="QuantDesk v$VER —— 美股量化终端"
+DMG="build/QuantDesk-$VER-arm64.dmg"
 NOTES="release-notes/$TAG.md"
 
 [ -f "$DMG" ] || { echo "❌ 找不到安装包 $DMG"; exit 1; }
