@@ -68,6 +68,22 @@ sudo xattr -dr com.apple.quarantine /Applications/QuantDesk.app
 
 或者在 Finder 里右键 → 打开（绕过 gatekeeper）。
 
+### 本地一键安装（源码打包后）
+
+```bash
+bash scripts/build-dmg.sh              # 打包，输出 build/QuantDesk-<版本>-arm64.dmg
+npm run install:local -- --launch      # 安装到 /Applications 并启动
+```
+
+`install-local.sh` 会依次做四件容易漏掉的事，任何一步漏掉都会出现「装是装上了，但打不开 / 数据错乱」：
+
+1. 挂载 dmg 并用 `ditto` 复制到 `/Applications`
+2. 清理文件代理留下的 `.BC.*` 临时副本（**不清会破坏代码签名**）
+3. 重新 ad-hoc 签名并去掉 quarantine 属性
+4. 杀掉从 `build/` 启动的旧实例，避免两个实例竞争写同一份 userData
+
+并且会用「dmg 内文件清单 vs 已安装文件清单」做差集核验，有差异直接中止。
+
 ### 源码启动
 
 ```bash
