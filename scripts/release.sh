@@ -7,10 +7,19 @@
 # 结果是说明内容被悄悄吃掉（踩过坑）。
 set -e
 cd "$(dirname "$0")/.."
-# 默认走本机 Clash 代理；如网络环境不同，用 RELEASE_PROXY 覆盖
-# （注意：不要直接读 HTTPS_PROXY，沙箱/CI 里常被设成一个不可用的本地代理）
-export HTTPS_PROXY="${RELEASE_PROXY:-socks5h://127.0.0.1:7890}"
-export HTTP_PROXY="${RELEASE_PROXY:-socks5h://127.0.0.1:7890}"
+# 代理策略：
+#   默认走本机 Clash；网络环境不同用 RELEASE_PROXY 覆盖。
+#   RELEASE_PROXY=none 表示**直连** —— 实测部分网络下 api.github.com 可以直连，
+#   而走代理反而返回 502（CONNECT tunnel failed），所以直连必须是一个显式选项。
+#   注意：不要直接读 HTTPS_PROXY，沙箱/CI 里常被设成一个不可用的本地代理。
+if [ "${RELEASE_PROXY:-auto}" = "none" ]; then
+  unset HTTPS_PROXY HTTP_PROXY https_proxy http_proxy
+  echo "   代理模式：直连"
+else
+  export HTTPS_PROXY="${RELEASE_PROXY:-socks5h://127.0.0.1:7890}"
+  export HTTP_PROXY="${RELEASE_PROXY:-socks5h://127.0.0.1:7890}"
+  echo "   代理模式：$HTTPS_PROXY"
+fi
 TOKEN="$1"
 # node 用于组装/解析 JSON，优先用 PATH 里的，退回到 WorkBuddy 托管版本（不要硬编码版本号）
 NODE_BIN="$(command -v node 2>/dev/null || ls -d /Users/hejialiang/.workbuddy/binaries/node/versions/*/bin/node 2>/dev/null | tail -1)"
