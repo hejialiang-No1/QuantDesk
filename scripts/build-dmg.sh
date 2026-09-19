@@ -30,7 +30,12 @@ rm -rf "$BUILD/$APP_NAME.app"
 mkdir -p "$BUILD"
 
 # 1) 复制 Electron.app 作为骨架
-cp -R "$SRC_APP" "$BUILD/$APP_NAME.app"
+#    ★ 必须用 tar 管道，不能用 `cp -R`。
+#    在某些受限环境（WorkBuddy 沙箱 / 受管文件系统）下，`cp -R` 复制 app bundle 里的
+#    `default_app.asar` 会被文件代理层拒绝，报 “Operation not permitted”，
+#    而 tar 走的是流式读写，不受该限制。踩过一次，别改回去。
+mkdir -p "$BUILD/$APP_NAME.app"
+(cd "$SRC_APP" && tar cf - .) | (cd "$BUILD/$APP_NAME.app" && tar xf -)
 # Electron 加载顺序：app.asar > app > default_app.asar；只要 app/ 在就不需要管 default_app
 
 # 2) 注入应用代码（Electron 会优先加载 Contents/Resources/app）
